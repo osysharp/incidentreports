@@ -1,0 +1,97 @@
+// Filing a report, the people in it, their statements and the files behind it.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Storage;
+using Osysharp.IncidentReports;
+
+[Test(Camp)]
+[runas(Cleo)]
+void any_member_of_staff_files_a_report_as_themself_and_it_gets_the_next_number() {
+  var r = ReportIncident(Cat("injury"), DateTime.UtcNow.AddMinutes(-20), "Dining hall", "Cut a finger on the bread knife.", "Plaster and a glove");
+  var saved = IncidentReport.Single(x => x.Location == "Dining hall");
+  Assert.Equal(IncidentStatus.Open, saved.Status);
+  Assert.Equal(Cleo.Id, saved.Reporter.Id);
+  Assert.Equal("Plaster and a glove", saved.ImmediateAction);
+  Assert.Equal("INC-00004", saved.Number);
+  Assert.Equal(1, HeardCount("reported"));
+  Assert.Equal(1, Heard.Count(h => h.Detail == "INC-00004:Dining hall"));
+}
+
+[Test(Camp)]
+[runas(Ada)]
+void a_report_in_the_future_with_no_description_or_place_or_a_retired_category_is_refused() {
+  Assert.Equal("An incident cannot have happened in the future.",
+               Assert.Throws<ValidationException>(() => ReportIncident(Cat("injury"), DateTime.UtcNow.AddDays(1), "Field", "Will happen")).Message);
+  Assert.Equal("Describe what happened.",
+               Assert.Throws<ValidationException>(() => ReportIncident(Cat("injury"), DateTime.UtcNow.AddHours(-1), "Field", "  ")).Message);
+  Assert.Equal("Say where it happened.",
+               Assert.Throws<ValidationException>(() => ReportIncident(Cat("injury"), DateTime.UtcNow.AddHours(-1), "", "A fall")).Message);
+  Assert.Equal("Retired category is no longer used.",
+               Assert.Throws<ValidationException>(() => ReportIncident(Cat("old"), DateTime.UtcNow.AddHours(-1), "Field", "A fall")).Message);
+}
+
+[Test(Camp)]
+[runas(Ada)]
+void the_author_corrects_the_facts_while_it_is_open_and_not_after_review_starts() {
+  var r = At("The jetty");
+  r.Description = "Milo slipped on the wet boards by the ladder and grazed his left knee.";
+  r.Location = "The jetty, by the ladder";
+  UnitOfWork.Commit();
+  Assert.Equal(1, IncidentReport.Count(x => x.Location == "The jetty, by the ladder"));
+  var canoe = At("Canoe dock");
+  Assert.Denied(() => { SetDescription(canoe, "Rewritten after the fact"); UnitOfWork.Commit(); });
+}
+
+[Test(Camp)]
+[runas(Ada)]
+void people_are_named_with_an_account_or_just_a_name() {
+  var r = At("Canoe dock");
+  runas(Dana) {
+    var canoe = At("Canoe dock");
+    AddIncidentPerson(canoe, IncidentRole.Involved, User.Single(u => u.DisplayName == "Nora Lund"));
+    AddIncidentPerson(canoe, IncidentRole.Witness, null, "A passer-by on the shore");
+    Assert.Equal(["Nora Lund", "A passer-by on the shore"], PeopleIn(canoe).Select(p => p.Name).ToList());
+    Assert.Equal("Say who it was.", Assert.Throws<ValidationException>(() => AddIncidentPerson(canoe, IncidentRole.Witness)).Message);
+    Assert.Equal("Nora Lund is already in this report as involved.",
+                 Assert.Throws<ValidationException>(() => AddIncidentPerson(canoe, IncidentRole.Involved, User.Single(u => u.DisplayName == "Nora Lund"))).Message);
+  }
+  // The author adds nothing once review has started.
+  Assert.Throws<NotAuthorized>(() => AddIncidentPerson(r, IncidentRole.Witness, null, "Somebody else"));
+}
+
+[Test(Camp)]
+[runas(Ben)]
+void a_witness_writes_his_own_statement() {
+  var mine = IncidentPerson.Single(p => p.Person == Ben);
+  GiveStatement(mine, "I saw him run onto the jetty and slip by the ladder.");
+  var saved = IncidentPerson.Single(p => p.Person == Ben);
+  Assert.Equal("I saw him run onto the jetty and slip by the ladder.", saved.Statement);
+  Assert.Equal(Ben.Id, saved.StatementBy!.Id);
+  Assert.NotNull(saved.StatementAt);
+}
+
+[Test(Camp)]
+[runas(Cleo)]
+void somebody_else_cannot_write_a_witness_statement() {
+  IncidentPerson? benLine = null;
+  runas(Dana) { benLine = Named("The jetty", "Ben Strand"); }
+  Assert.Throws(() => GiveStatement(benLine!, "Made up"));
+}
+
+[Test(Camp)]
+[runas(Ada)]
+void the_author_attaches_a_photo_and_reads_it_back_and_a_colleague_does_not() {
+  var r = At("The jetty");
+  var f = AttachIncidentFile(r, File.Create("jetty.jpg", "image/jpeg", Encoding.UTF8.GetBytes("a photo of the wet boards")));
+  Assert.Equal(["jetty.jpg"], FilesOf(r).Select(x => x.Name).ToList());
+  runas(Cleo) { Assert.Equal(0, IncidentFile.Count()); }
+  runas(Dana) { Assert.Equal(1, FilesOf(At("The jetty")).Count); }
+}
+
+[Test(Camp)]
+[runas(Ada)]
+void a_file_cannot_be_added_to_a_report_under_review_by_its_author() {
+  var r = At("Canoe dock");
+  Assert.Throws<NotAuthorized>(() => AttachIncidentFile(r, File.Create("canoe.jpg", "image/jpeg", Encoding.UTF8.GetBytes("x"))));
+}

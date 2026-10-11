@@ -1,0 +1,181 @@
+// Corrective actions — what will stop it happening again, each with an owner and a due date. The owner reads their
+// action (never the report behind it), marks it done with a note, and the app is told once when one falls overdue.
+
+namespace Osysharp.IncidentReports;
+
+using Osysharp.Identity;
+using Osysharp.Workflow;
+
+/// Where an action stands. ⚠ Appended, never inserted.
+public enum ActionStatus {
+  [Label("Open")] Open,
+  [Label("Done")] Done,
+  [Label("Cancelled")] Cancelled,
+}
+
+/// Where an action's own clock is — `ActionLife` owns it.
+public enum ActionPhase { Waiting, Over }
+
+/// One corrective or preventive action on a report. Its owner reads it — with the report's number and category, which
+/// it carries, and nothing else of the report — and marks it done; reviewers set, read and cancel every one.
+public entity CorrectiveAction {
+  [Required, Immutable] IncidentReport Report;
+  /// The report's number and category as the action was set — what its owner reads instead of the report.
+  [Immutable, MaxLength(200)] string About = "";
+  [Required("Say what is to be done."), MaxLength(1000)] string What;
+  [Required("Say who does it.")] Principal Owner;
+  DateOnly DueOn;
+  ActionStatus Status = ActionStatus.Open;
+  [Immutable] Principal? SetBy;
+  [Immutable] DateTime SetAt = DateTime.UtcNow;
+  Principal? DoneBy;
+  DateTime? DoneAt;
+  [MaxLength(2000)] string DoneNote = "";
+  /// The due date the app was last told had passed, so each is told once.
+  DateOnly? OverdueFor;
+  ActionPhase Phase;            // no default — ActionLife owns it
+
+  security {
+    allow read when IsAuthenticated where Owner == user;
+    allow read when ReviewsIncidents;
+    allow create, update when IsAuthenticated;
+    deny create except via AssignCorrectiveAction;
+    deny update What, Owner, DueOn except via ChangeCorrectiveAction;
+    deny update Status, DoneBy, DoneAt, DoneNote except via CompleteCorrectiveAction, CancelCorrectiveAction;
+    deny update OverdueFor;
+  }
+}
+
+/// An action was set — the moment to tell its owner.
+[Event("Corrective action assigned")]
+public sealed class CorrectiveActionAssigned { public CorrectiveAction Action; }
+
+/// An action was done.
+[Event("Corrective action done")]
+public sealed class CorrectiveActionCompleted { public CorrectiveAction Action; }
+
+/// An action passed its due date and is still open.
+[Event("Corrective action overdue")]
+public sealed class CorrectiveActionOverdue { public CorrectiveAction Action; }
+
+/// "INC-00012 · Slip or trip" — what an action's owner reads of the report.
+public string ActionAbout(IncidentReport report) { return report.Number + " · " + report.Category.Name; }
+
+/// Set an action on a report: what is to be done, by whom, by when. Reviewers only; not on a closed report.
+[Server, Authorize(ReviewsIncidents)]
+public CorrectiveAction AssignCorrectiveAction(IncidentReport report, string what, Principal owner, DateOnly dueOn) {
+  if (report.Status == IncidentStatus.Closed) { throw new ValidationException(report.Number + " is closed — re-open it to add an action."); }
+  if (string.IsNullOrWhiteSpace(what)) { throw new ValidationException("Say what is to be done."); }
+  var a = new CorrectiveAction { Report = report, About = ActionAbout(report), What = what.Trim(), Owner = owner, DueOn = dueOn,
+                                 SetBy = CurrentPrincipal() };
+  Raise(new CorrectiveActionAssigned { Action = a });
+  UnitOfWork.Commit();
+  return a;
+}
+
+/// Change what an open action asks, who does it, or by when. Reviewers only.
+[Server, Authorize(ReviewsIncidents)]
+public void ChangeCorrectiveAction(CorrectiveAction action, string what, Principal owner, DateOnly dueOn) {
+  if (action.Status != ActionStatus.Open) { throw new ValidationException("That action is " + action.Status.Label.ToLower() + "."); }
+  if (string.IsNullOrWhiteSpace(what)) { throw new ValidationException("Say what is to be done."); }
+  var reassigned = action.Owner != owner;
+  action.What = what.Trim();
+  action.Owner = owner;
+  action.DueOn = dueOn;
+  ActionLife.RaiseChanged(action);
+  if (reassigned) { Raise(new CorrectiveActionAssigned { Action = action }); }
+  UnitOfWork.Commit();
+}
+
+/// Mark an action done, with what was done — its owner, or a reviewer.
+[Server, Authorize(IsAuthenticated)]
+public void CompleteCorrectiveAction(CorrectiveAction action, string note) {
+  if (action.Owner != CurrentPrincipal() && !ReviewsIncidents) { throw new NotAuthorized("Only its owner or a reviewer can mark an action done."); }
+  if (action.Status != ActionStatus.Open) { throw new ValidationException("That action is already " + action.Status.Label.ToLower() + "."); }
+  if (string.IsNullOrWhiteSpace(note)) { throw new ValidationException("Say what was done."); }
+  action.Status = ActionStatus.Done;
+  action.DoneBy = CurrentPrincipal();
+  action.DoneAt = DateTime.UtcNow;
+  action.DoneNote = note.Trim();
+  ActionLife.RaiseChanged(action);
+  Raise(new CorrectiveActionCompleted { Action = action });
+  UnitOfWork.Commit();
+}
+
+/// Call an action off, saying why. Reviewers only.
+[Server, Authorize(ReviewsIncidents)]
+public void CancelCorrectiveAction(CorrectiveAction action, string why) {
+  if (action.Status != ActionStatus.Open) { throw new ValidationException("That action is already " + action.Status.Label.ToLower() + "."); }
+  if (string.IsNullOrWhiteSpace(why)) { throw new ValidationException("Say why it is called off."); }
+  action.Status = ActionStatus.Cancelled;
+  action.DoneBy = CurrentPrincipal();
+  action.DoneAt = DateTime.UtcNow;
+  action.DoneNote = why.Trim();
+  ActionLife.RaiseChanged(action);
+  UnitOfWork.Commit();
+}
+
+/// The caller's own open actions, soonest due first.
+public List<CorrectiveAction> MyCorrectiveActions() {
+  var me = CurrentPrincipal();
+  return CorrectiveAction.Where(a => a.Owner == me && a.Status == ActionStatus.Open).OrderBy(a => a.DueOn).Take(100).ToList();
+}
+
+/// Every action on `report`, as the caller may see them — open first, then by due date.
+public List<CorrectiveAction> ActionsOn(IncidentReport report) {
+  return CorrectiveAction.Include(a => a.Owner).Where(a => a.Report == report).OrderBy(a => a.Status).ThenBy(a => a.DueOn).Take(100).ToList();
+}
+
+/// Open actions past their due date, the longest overdue first. Reviewers only.
+[Authorize(ReviewsIncidents)]
+public List<CorrectiveAction> OverdueActions() {
+  var today = DateOnly.FromDateTime(DateTime.UtcNow);
+  return CorrectiveAction.Include(a => a.Owner).Where(a => a.Status == ActionStatus.Open && a.DueOn < today)
+    .OrderBy(a => a.DueOn).Take(200).ToList();
+}
+
+// ── each action's clock, as the system ──────────────────────────────────────────────────────────────────────────────
+
+public workflow ActionLife {
+  Tracks    = CorrectiveAction.Phase;
+  Autostart = true;
+  Initial   = Waiting;
+
+  /// Done, cancelled or moved — the clock is set again.
+  event Changed();
+
+  state Waiting {
+    Expire { Within = UntilActionOverdue(this.Item); Accrues = false; }
+    on Expire {
+      if (TickAction(this.Item)) { goto Over; }
+      goto Waiting;
+    }
+    on Changed {
+      if (this.Item.Status != ActionStatus.Open) { goto Over; }
+      goto Waiting;
+    }
+  }
+
+  terminal success Over { }
+}
+
+/// The moment an action falls overdue: the start of the day after its due date.
+public DateTime ActionOverdueAt(CorrectiveAction a) { return a.DueOn.AddDays(1).ToDateTime(new TimeOnly(0, 0)); }
+
+/// How long until an open action falls overdue, never below zero; nothing is due for one already told about.
+public TimeSpan UntilActionOverdue(CorrectiveAction a) {
+  if (a.Status != ActionStatus.Open || a.OverdueFor == a.DueOn) { return TimeSpan.FromDays(36500); }
+  var at = ActionOverdueAt(a);
+  var now = DateTime.UtcNow;
+  return at <= now ? TimeSpan.Zero : at - now;
+}
+
+/// Tells the app an action fell overdue, once per due date; true when the action's clock is over.
+bool TickAction(CorrectiveAction a) {
+  if (a.Status != ActionStatus.Open) { return true; }
+  if (a.OverdueFor != a.DueOn && ActionOverdueAt(a) <= DateTime.UtcNow) {
+    a.OverdueFor = a.DueOn;
+    Raise(new CorrectiveActionOverdue { Action = a });
+  }
+  return false;
+}

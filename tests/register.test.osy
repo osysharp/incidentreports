@@ -1,0 +1,77 @@
+// The register and its export, the desk's figures, the categories and severities — and forgetting a person.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.IncidentReports;
+
+[Test(Camp)]
+[runas(Dana)]
+void the_register_lists_a_periods_reports_oldest_first_with_who_was_hurt() {
+  var rows = IncidentRegister(new DateOnly(2026, 7, 1), new DateOnly(2026, 7, 31));
+  Assert.Equal(["INC-00002", "INC-00001", "INC-00003"], rows.Select(r => r.Number).ToList());
+  var knee = rows.Single(r => r.Number == "INC-00001");
+  Assert.Equal("Milo Varga (first aid on site)", knee.Hurt);
+  Assert.Equal("Injury", knee.Category);
+  Assert.Equal("Minor", knee.Severity);
+  Assert.Equal("Ada Okafor", knee.ReportedBy);
+  Assert.Equal(1, IncidentRegister(new DateOnly(2026, 7, 12), new DateOnly(2026, 7, 12)).Count);
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void the_export_is_a_csv_with_one_line_per_report() {
+  var csv = IncidentRegisterCsv(new DateOnly(2026, 7, 1), new DateOnly(2026, 7, 31));
+  var lines = csv.Trim().Split("\n");
+  Assert.Equal(4, lines.Length);
+  Assert.Contains("number,occurred,reported,category,severity,location,what_happened,hurt", lines[0]);   // after the BOM spreadsheets read UTF-8 by
+  Assert.Contains("INC-00001,2026-07-14 09:40", csv);
+  Assert.Contains("Pine Lake Day Camp", lines[1]);
+  Assert.NotEqual("", IncidentRegisterFileLink(new DateOnly(2026, 7, 1), new DateOnly(2026, 7, 31)));
+}
+
+[Test(Camp)]
+[runas(Ada)]
+void the_register_and_the_figures_are_for_reviewers_only() {
+  Assert.Denied(() => IncidentRegister(new DateOnly(2026, 7, 1), new DateOnly(2026, 7, 31)));
+  Assert.Denied(() => IncidentRegisterCsv(new DateOnly(2026, 7, 1), new DateOnly(2026, 7, 31)));
+  Assert.Denied(() => IncidentFiguresNow());
+  Assert.Denied(() => OpenIncidents());
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void the_figures_count_what_is_open_under_review_and_by_category() {
+  var f = IncidentFiguresNow();
+  Assert.Equal(2, f.Open);
+  Assert.Equal(1, f.UnderReview);
+  Assert.Equal(0, f.AwaitingAuthority);
+  Assert.Equal(3, f.ByCategory.Count);
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void the_director_adds_a_category_and_a_severity_and_a_counsellor_cannot() {
+  new IncidentCategory { Key = "illness", Name = "Illness", AsksAboutInjury = true };
+  new IncidentSeverity { Key = "fatal", Name = "Fatal", Rank = 5, ReportWithinHours = 8, Authority = "OSHA" };
+  UnitOfWork.Commit();
+  Assert.Equal(6, IncidentCategory.Count());
+  runas(Ada) {
+    Assert.Equal(6, IncidentCategory.Count());
+    Assert.Denied(() => { new IncidentCategory { Key = "mine", Name = "Mine" }; UnitOfWork.Commit(); });
+  }
+  Assert.Throws(() => { new IncidentCategory { Key = "injury", Name = "Twice" }; UnitOfWork.Commit(); });
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void forgetting_a_person_blanks_their_lines_and_keeps_the_report() {
+  GiveStatement(Named("The jetty", "Ben Strand"), "He ran and slipped.");
+  InformAboutIncident(Named("The jetty", "Milo Varga"), Pia);
+  Assert.Equal(1, EraseIncidentDataOf(Ben));
+  var line = IncidentPerson.Single(p => p.Person == Ben);
+  Assert.Equal("Erased", line.Name);
+  Assert.Equal("", line.Statement);
+  Assert.Equal(1, EraseIncidentDataOf(Pia));
+  Assert.Equal(0, IncidentNotice.Count());
+  Assert.Equal(3, IncidentReport.Count());
+}

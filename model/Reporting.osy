@@ -1,0 +1,162 @@
+// Filing a report, and the review that takes it from Open to Closed: taken up, classified, its cause and outcome
+// written, reported to an authority when it must be, closed once its actions are done — and re-opened when it was not.
+
+namespace Osysharp.IncidentReports;
+
+using Osysharp.Identity;
+
+/// The category with key `key` — refused, with the reason, for an unknown or retired one.
+public IncidentCategory CategoryToFile(string key) {
+  var c = IncidentCategory.FirstOrDefault(x => x.Key == key);
+  if (c == null) { throw new ValidationException("There is no incident category '" + key + "'."); }
+  if (!c.Active) { throw new ValidationException(c.Name + " is no longer used."); }
+  return c;
+}
+
+/// File an incident as the person calling. `severity`, when given, is the reporter's own view — a reviewer classifies it.
+/// Refused, with the reason, when it is said to have happened in the future, or nothing says what happened or where.
+[Server, Authorize(ReportsIncidents)]
+public IncidentReport ReportIncident(IncidentCategory category, DateTime occurredAt, string location, string description,
+                                     string immediateAction = "", IncidentSeverity? severity = null) {
+  if (occurredAt > DateTime.UtcNow.AddMinutes(5)) { throw new ValidationException("An incident cannot have happened in the future."); }
+  if (string.IsNullOrWhiteSpace(description)) { throw new ValidationException("Describe what happened."); }
+  if (string.IsNullOrWhiteSpace(location)) { throw new ValidationException("Say where it happened."); }
+  if (!category.Active) { throw new ValidationException(category.Name + " is no longer used."); }
+  var report = new IncidentReport {
+    Reporter = CurrentPrincipal(), OccurredAt = occurredAt, Category = category, Location = location.Trim(),
+    Description = description.Trim(), ImmediateAction = immediateAction.Trim(), Severity = severity,
+  };
+  Raise(new IncidentReported { Report = report });
+  UnitOfWork.Commit();
+  return report;
+}
+
+/// Take a report up for review: it becomes the record, and its author can no longer change it. Reviewers only.
+[Server, Authorize(ReviewsIncidents)]
+public void StartIncidentReview(IncidentReport report, string notes = "") {
+  if (report.Status != IncidentStatus.Open) { throw new ValidationException(report.Number + " is " + report.Status.Label.ToLower() + ", not open."); }
+  report.Status = IncidentStatus.UnderReview;
+  report.ReviewedBy = CurrentPrincipal();
+  report.ReviewStartedAt = DateTime.UtcNow;
+  if (notes.Trim() != "") { report.ReviewNotes = notes.Trim(); }
+  Raise(new IncidentReviewStarted { Report = report });
+  UnitOfWork.Commit();
+}
+
+/// Classify a report: its severity, and — when the severity must be reported to an authority — the deadline, counted
+/// from when it was reported here. A severity that needs no report leaves a deadline a reviewer set by hand as it is.
+[Server, Authorize(ReviewsIncidents)]
+public void ClassifyIncident(IncidentReport report, IncidentSeverity severity) {
+  report.Severity = severity;
+  if (severity.ReportWithinHours != null && !report.Reportable) {
+    report.Reportable = true;
+    report.Authority = severity.Authority;
+    report.AuthorityDueAt = report.ReportedAt.AddHours(severity.ReportWithinHours.Value);
+    IncidentLife.RaiseChanged(report);
+    Raise(new IncidentReportable { Report = report });
+  }
+  UnitOfWork.Commit();
+}
+
+/// A reviewer says a report must go to `authority` by `dueAt` — whatever its severity — or (`reportable` false) that it
+/// need not after all.
+[Server, Authorize(ReviewsIncidents)]
+public void MarkIncidentReportable(IncidentReport report, bool reportable, string authority = "", DateTime? dueAt = null) {
+  if (report.ReportedToAuthorityAt != null) { throw new ValidationException(report.Number + " has already been reported."); }
+  if (reportable && dueAt == null) { throw new ValidationException("Say by when it must be reported."); }
+  var was = report.Reportable;
+  report.Reportable = reportable;
+  report.Authority = reportable ? authority.Trim() : "";
+  report.AuthorityDueAt = reportable ? dueAt : null;
+  IncidentLife.RaiseChanged(report);
+  if (reportable && !was) { Raise(new IncidentReportable { Report = report }); }
+  UnitOfWork.Commit();
+}
+
+/// Record that a report went to its authority, with the authority's own reference. Its deadline then asks nothing more.
+[Server, Authorize(ReviewsIncidents)]
+public void RecordAuthorityReport(IncidentReport report, string reference, DateTime? at = null) {
+  if (!report.Reportable) { throw new ValidationException(report.Number + " is not marked as reportable."); }
+  if (string.IsNullOrWhiteSpace(reference)) { throw new ValidationException("Write the authority's reference for it."); }
+  report.ReportedToAuthorityAt = at ?? DateTime.UtcNow;
+  report.AuthorityReference = reference.Trim();
+  IncidentLife.RaiseChanged(report);
+  UnitOfWork.Commit();
+}
+
+/// Write what the review found — the cause, and (for the reporter, once it closes) the outcome; empty leaves either as
+/// it was. `notes` are added to the internal notes.
+[Server, Authorize(ReviewsIncidents)]
+public void RecordIncidentFindings(IncidentReport report, string rootCause = "", string outcome = "", string notes = "") {
+  if (rootCause.Trim() != "") { report.RootCause = rootCause.Trim(); }
+  if (outcome.Trim() != "") { report.Outcome = outcome.Trim(); }
+  if (notes.Trim() != "") { report.ReviewNotes = report.ReviewNotes == "" ? notes.Trim() : report.ReviewNotes + "\n\n" + notes.Trim(); }
+  UnitOfWork.Commit();
+}
+
+/// The open corrective actions on `report` — what stands between it and closing.
+public List<CorrectiveAction> OpenActionsOn(IncidentReport report) {
+  return CorrectiveAction.Where(a => a.Report == report && a.Status == ActionStatus.Open).OrderBy(a => a.DueOn).Take(50).ToList();
+}
+
+/// Close a report under review, with its outcome. Refused while a corrective action on it is open (unless the app allows
+/// it), and while it is reportable and not reported — naming what is left.
+[Server, Authorize(ReviewsIncidents)]
+public void CloseIncident(IncidentReport report, string outcome = "") {
+  if (report.Status != IncidentStatus.UnderReview) {
+    throw new ValidationException(report.Status == IncidentStatus.Open ? "Start the review of " + report.Number + " before closing it."
+                                                                       : report.Number + " is already closed.");
+  }
+  var open = OpenActionsOn(report);
+  if (open.Count > 0 && !App.Setting<IncidentsSetup>().CloseWithOpenActions) {
+    throw new ValidationException(report.Number + " has actions still open: " + string.Join("; ", open.Select(a => a.What)) + ".");
+  }
+  if (report.Reportable && report.ReportedToAuthorityAt == null) {
+    throw new ValidationException(report.Number + " must be reported to " + (report.Authority == "" ? "the authority" : report.Authority) + " before it closes.");
+  }
+  if (outcome.Trim() != "") { report.Outcome = outcome.Trim(); }
+  report.Status = IncidentStatus.Closed;
+  report.ClosedAt = DateTime.UtcNow;
+  report.ReviewedBy = CurrentPrincipal();
+  Raise(new IncidentClosed { Report = report });
+  UnitOfWork.Commit();
+}
+
+/// Re-open a closed report for review, saying why — added to the internal notes.
+[Server, Authorize(ReviewsIncidents)]
+public void ReopenIncident(IncidentReport report, string why) {
+  if (report.Status != IncidentStatus.Closed) { throw new ValidationException(report.Number + " is not closed."); }
+  if (string.IsNullOrWhiteSpace(why)) { throw new ValidationException("Say why it is re-opened."); }
+  report.Status = IncidentStatus.UnderReview;
+  report.ClosedAt = null;
+  report.ReviewNotes = (report.ReviewNotes == "" ? "" : report.ReviewNotes + "\n\n") + "Re-opened: " + why.Trim();
+  Raise(new IncidentReopened { Report = report });
+  UnitOfWork.Commit();
+}
+
+/// The outcome a report's author may read: the review's outcome once it is closed, when the app lets reporters read it.
+public string OutcomeForReporter(IncidentReport report) {
+  if (report.Status != IncidentStatus.Closed || !App.Setting<IncidentsSetup>().ReportersReadOutcome) { return ""; }
+  return report.Outcome;
+}
+
+/// The caller's own reports, newest first.
+public List<IncidentReport> MyIncidents() {
+  var me = CurrentPrincipal();
+  return IncidentReport.Include(r => r.Category).Include(r => r.Severity).Where(r => r.Reporter == me)
+    .OrderByDescending(r => r.ReportedAt).Take(100).ToList();
+}
+
+/// Reports still being dealt with — Open and Under review — oldest first. Reviewers only.
+[Authorize(ReviewsIncidents)]
+public List<IncidentReport> OpenIncidents() {
+  return IncidentReport.Include(r => r.Category).Include(r => r.Severity).Where(r => r.Status != IncidentStatus.Closed)
+    .OrderBy(r => r.ReportedAt).Take(200).ToList();
+}
+
+/// Reports that must go to an authority and have not, soonest deadline first. Reviewers only.
+[Authorize(ReviewsIncidents)]
+public List<IncidentReport> AwaitingAuthorityReport() {
+  return IncidentReport.Include(r => r.Category).Where(r => r.Reportable && r.ReportedToAuthorityAt == null)
+    .OrderBy(r => r.AuthorityDueAt).Take(100).ToList();
+}

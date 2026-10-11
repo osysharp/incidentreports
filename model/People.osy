@@ -1,0 +1,180 @@
+// Who was involved in an incident — hurt, involved, or a witness — with an account or just a name; their injury and
+// the treatment given (health data); their statement in their own words; and the photos and files behind a report.
+
+namespace Osysharp.IncidentReports;
+
+using Osysharp.Identity;
+using Osysharp.Storage;
+
+/// What somebody was to an incident. ⚠ Appended, never inserted.
+public enum IncidentRole {
+  [Label("Hurt")] Injured,
+  [Label("Involved")] Involved,
+  [Label("Witness")] Witness,
+}
+
+/// The care somebody hurt received. ⚠ Appended, never inserted.
+public enum IncidentTreatment {
+  [Label("None needed")] None,
+  [Label("First aid on site")] FirstAid,
+  [Label("Sent home")] SentHome,
+  [Label("Seen by a doctor")] Doctor,
+  [Label("Taken to hospital")] Hospital,
+  [Label("Ambulance called")] Ambulance,
+}
+
+/// One person in a report. `Person` is their account when they have one — a member of staff, a member, or a child or a
+/// visitor with an account they never sign in to (Osysharp.UserAccounts' managed accounts) — and empty for somebody known
+/// only by name. Read wherever the report is, and by the person themself (their own row, never the report).
+[SuppressWarning("cost-row-rule-asked-of-every-caller")]
+public entity IncidentPerson {
+  [Required, Immutable] IncidentReport Report;
+  [Immutable] Principal? Person;
+  [Required("Say who it was."), MaxLength(200), Classification(Personal.Identity)] string Name;
+  IncidentRole Role = IncidentRole.Involved;
+  /// The injury — what and where on the body. Health data.
+  [MaxLength(2000), Classification(Personal.Special)] string Injury = "";
+  IncidentTreatment Treatment = IncidentTreatment.None;
+  /// More about the care given — who gave first aid, which hospital. Health data.
+  [MaxLength(2000), Classification(Personal.Special)] string TreatmentNote = "";
+  /// Days they could not work or attend afterwards — what an over-seven-day report and an injury log count.
+  [Min(0), Max(3650)] int DaysAway = 0;
+  /// Their account of what happened, in their own words — written by them, or taken down for them.
+  [MaxLength(8000), Classification(Personal.Content)] string Statement = "";
+  DateTime? StatementAt;
+  /// Who wrote the statement down — the person themself, or whoever took it.
+  Principal? StatementBy;
+  [Immutable] Principal? AddedBy;
+  [Immutable] DateTime AddedAt = DateTime.UtcNow;
+
+  security {
+    allow read when IsAuthenticated where Report.Reporter == user || Person == user;
+    allow read when ReviewsIncidents;
+    allow create, update when IsAuthenticated;
+    deny create except via AddIncidentPerson;
+    deny update Role, Treatment, DaysAway except via UpdateIncidentPerson;
+    deny update Injury, TreatmentNote except via UpdateIncidentPerson, EraseIncidentDataOf;
+    deny update Name except via EraseIncidentDataOf;
+    deny update Statement except via GiveStatement, EraseIncidentDataOf;
+    deny update StatementAt, StatementBy except via GiveStatement;
+    allow delete when ReviewsIncidents;
+    deny delete except via RemoveIncidentPerson;
+  }
+}
+
+/// A photo or a file behind a report — the scene, the damage, a doctor's note. Read wherever the report is.
+[SuppressWarning("cost-row-rule-asked-of-every-caller")]
+public entity IncidentFile {
+  [Required, Immutable] IncidentReport Report;
+  [Required, Immutable, Attachment] FileAsset File;
+  [Immutable, MaxLength(200)] string Name = "";
+  [Immutable] DateTime AddedAt = DateTime.UtcNow;
+  [Immutable] Principal? AddedBy;
+
+  security {
+    allow read when IsAuthenticated where Report.Reporter == user;
+    allow read when ReviewsIncidents;
+    allow create when IsAuthenticated;
+    deny create except via AttachIncidentFile;
+  }
+}
+
+/// Whether the caller may add to `report` — its author while it is open, a reviewer at any time.
+public bool MayAddTo(IncidentReport report) {
+  if (ReviewsIncidents) { return true; }
+  return report.Reporter == CurrentPrincipal() && report.Status == IncidentStatus.Open;
+}
+
+/// Name somebody in a report: hurt, involved or a witness. `person` is their account when they have one (its display
+/// name is used when `name` is empty); `name` alone for somebody without one. By the report's author while it is open,
+/// or a reviewer.
+[Server, Authorize(IsAuthenticated)]
+public IncidentPerson AddIncidentPerson(IncidentReport report, IncidentRole role, Principal? person = null, string name = "",
+                                        string injury = "", IncidentTreatment treatment = IncidentTreatment.None,
+                                        string treatmentNote = "") {
+  if (!MayAddTo(report)) { throw new NotAuthorized("Only the person who filed it, while it is open, or a reviewer can add to a report."); }
+  var shown = name.Trim() != "" ? name.Trim() : person != null ? person!.DisplayName ?? "" : "";
+  if (shown == "") { throw new ValidationException("Say who it was."); }
+  if (person != null && IncidentPerson.Any(p => p.Report == report && p.Person == person && p.Role == role)) {
+    throw new ValidationException(shown + " is already in this report as " + role.Label.ToLower() + ".");
+  }
+  var p = new IncidentPerson { Report = report, Person = person, Name = shown, Role = role, Injury = injury.Trim(),
+                               Treatment = treatment, TreatmentNote = treatmentNote.Trim(), AddedBy = CurrentPrincipal() };
+  UnitOfWork.Commit();
+  return p;
+}
+
+/// Correct what a report says about somebody — their part in it, the injury, the care given, the days away.
+[Server, Authorize(IsAuthenticated)]
+public void UpdateIncidentPerson(IncidentPerson p, IncidentRole role, string injury, IncidentTreatment treatment,
+                                 string treatmentNote, int daysAway = 0) {
+  if (!MayAddTo(p.Report)) { throw new NotAuthorized("Only the person who filed it, while it is open, or a reviewer can change a report."); }
+  if (daysAway < 0) { throw new ValidationException("Days away cannot be below zero."); }
+  p.Role = role;
+  p.Injury = injury.Trim();
+  p.Treatment = treatment;
+  p.TreatmentNote = treatmentNote.Trim();
+  p.DaysAway = daysAway;
+  UnitOfWork.Commit();
+}
+
+/// Take somebody named by mistake out of a report. Reviewers only.
+[Server, Authorize(ReviewsIncidents)]
+public void RemoveIncidentPerson(IncidentPerson p) {
+  if (IncidentNotice.Any(n => n.About == p)) { throw new ValidationException("Somebody has been told about " + p.Name + ", so the record stays."); }
+  p.Delete();
+  UnitOfWork.Commit();
+}
+
+/// Give a statement: the person themself (a witness writing what they saw), or the report's author or a reviewer
+/// taking it down for them. A new statement replaces the last one, and says who wrote it and when.
+[Server, Authorize(IsAuthenticated)]
+public void GiveStatement(IncidentPerson p, string statement) {
+  var me = CurrentPrincipal();
+  // The person themself reads their own row and never the report, so their own statement asks nothing of it.
+  var own = p.Person != null && p.Person == me;
+  if (!own && !MayAddTo(p.Report)) { throw new NotAuthorized("Only the person themself, the report's author or a reviewer can write a statement."); }
+  if (string.IsNullOrWhiteSpace(statement)) { throw new ValidationException("Write the statement."); }
+  p.Statement = statement.Trim();
+  p.StatementAt = DateTime.UtcNow;
+  p.StatementBy = me;
+  UnitOfWork.Commit();
+}
+
+/// Keep a file just uploaded privately by the caller as theirs — a photo, a scan — ready to attach to a report. Refused,
+/// with the reason, for anything but a picture, a video or a PDF.
+[Server, Authorize(IsAuthenticated)]
+public FileAsset KeepIncidentFile(UploadedFile upload) {
+  if (!upload.Path.StartsWith("uploads/") || !File.IsOwnUpload(upload.Path)) {
+    throw new ValidationException("Upload the file again, from this page.");
+  }
+  var type = upload.ContentType;
+  if (type != "application/pdf" && !type.StartsWith("image/") && !type.StartsWith("video/")) {
+    throw new ValidationException("A report takes photos, videos and PDFs.");
+  }
+  var bytes = File.ReadAllBytes(upload.Path);
+  var file = File.Create(upload.FileName, type, bytes);
+  File.Delete(upload.Path);
+  UnitOfWork.Commit();
+  return file;
+}
+
+/// Attach `file` — the caller's own (`KeepIncidentFile`) — to a report: its author while it is open, a reviewer at any
+/// time. Whoever may read the report may then read the file.
+[Server, Authorize(IsAuthenticated)]
+public IncidentFile AttachIncidentFile(IncidentReport report, FileAsset file) {
+  if (!MayAddTo(report)) { throw new NotAuthorized("Only the person who filed it, while it is open, or a reviewer can add a file."); }
+  var f = new IncidentFile { Report = report, File = file, Name = file.Name, AddedBy = CurrentPrincipal() };
+  UnitOfWork.Commit();
+  return f;
+}
+
+/// The people named in `report`, the hurt first, as the caller may see them.
+public List<IncidentPerson> PeopleIn(IncidentReport report) {
+  return IncidentPerson.Where(p => p.Report == report).OrderBy(p => p.Role).ThenBy(p => p.AddedAt).Take(100).ToList();
+}
+
+/// The files behind `report`, as the caller may see them.
+public List<IncidentFile> FilesOf(IncidentReport report) {
+  return IncidentFile.Include(f => f.File).Where(f => f.Report == report).OrderBy(f => f.AddedAt).Take(100).ToList();
+}

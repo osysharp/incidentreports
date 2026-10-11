@@ -1,0 +1,62 @@
+// Each report's clock, as the system: a reportable incident's deadline to its authority — a warning before it, and word
+// when it passes — both only while it has not been reported. A report with no deadline sleeps until one is set.
+
+namespace Osysharp.IncidentReports;
+
+using Osysharp.Workflow;
+
+public workflow IncidentLife {
+  Tracks    = IncidentReport.Phase;
+  Autostart = true;
+  Initial   = Watching;
+
+  /// Made reportable or not, reported, or its deadline moved — the clock is set again.
+  event Changed();
+
+  state Watching {
+    Expire { Within = UntilIncidentTick(this.Item); Accrues = false; }
+    on Expire {
+      TickIncident(this.Item);
+      goto Watching;
+    }
+    on Changed { goto Watching; }
+  }
+
+  terminal success Done { }
+}
+
+/// When the app is warned about a deadline: `AuthorityWarningHours` before it.
+public DateTime AuthorityWarningAt(IncidentReport r) {
+  return r.AuthorityDueAt!.Value.AddHours(-App.Setting<IncidentsSetup>().AuthorityWarningHours);
+}
+
+/// How long until something is due — the warning, or the deadline — never below zero. Nothing is due for a report
+/// with no deadline, or one already reported.
+public TimeSpan UntilIncidentTick(IncidentReport r) {
+  if (!r.Reportable || r.AuthorityDueAt == null || r.ReportedToAuthorityAt != null || r.OverdueFor == r.AuthorityDueAt) {
+    return TimeSpan.FromDays(36500);
+  }
+  var now = DateTime.UtcNow;
+  var due = r.AuthorityDueAt!.Value;
+  var warn = AuthorityWarningAt(r);
+  var at = App.Setting<IncidentsSetup>().AuthorityWarningHours > 0 && r.WarnedFor != r.AuthorityDueAt && warn < due ? warn : due;
+  return at <= now ? TimeSpan.Zero : at - now;
+}
+
+/// Does what is due now: the warning once per deadline, and word once when the deadline passes.
+void TickIncident(IncidentReport r) {
+  if (!r.Reportable || r.AuthorityDueAt == null || r.ReportedToAuthorityAt != null) { return; }
+  var now = DateTime.UtcNow;
+  var due = r.AuthorityDueAt!.Value;
+  if (due <= now) {
+    if (r.OverdueFor != r.AuthorityDueAt) {
+      r.OverdueFor = r.AuthorityDueAt;
+      Raise(new IncidentAuthorityReportOverdue { Report = r });
+    }
+    return;
+  }
+  if (App.Setting<IncidentsSetup>().AuthorityWarningHours > 0 && r.WarnedFor != r.AuthorityDueAt && AuthorityWarningAt(r) <= now) {
+    r.WarnedFor = r.AuthorityDueAt;
+    Raise(new IncidentAuthorityReportDue { Report = r });
+  }
+}

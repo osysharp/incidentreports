@@ -1,0 +1,77 @@
+// The camp's world, its people, and the helpers the tests read through.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.IncidentReports;
+
+principal Ada => User.Single(u => u.Email == "ada@pinelake.test");
+principal Ben => User.Single(u => u.Email == "ben@pinelake.test");
+principal Cleo => User.Single(u => u.Email == "cleo@pinelake.test");
+principal Dana => User.Single(u => u.Email == "dana@pinelake.test");
+principal Pia => User.Single(u => u.Email == "pia@pinelake.test");
+principal Rob => User.Single(u => u.Email == "rob@pinelake.test");
+principal Milo => User.Single(u => u.DisplayName == "Milo Varga");
+
+User Person(string email, string name, CampRole role) {
+  var u = new User { Email = email, DisplayName = name, EmailVerifiedAt = DateTime.UtcNow };
+  new RoleGrant { Member = u, Role = role };
+  return u;
+}
+
+/// A Tuesday in July. Ada and Ben are counsellors, Cleo cooks, Dana directs; Pia's son Milo and Rob's daughter Nora are
+/// campers with accounts their parents made. Ada filed Milo's grazed knee this morning (still open, Ben saw it) and a
+/// canoe that nearly tipped over on Sunday (under review); Ben filed a broken window an hour ago.
+[TestFixture, DevSeed("A day camp with three incident reports")]
+void Camp() {
+  TestClock.Set(new DateTime(2026, 7, 14, 11, 0, 0));
+  var ada = Person("ada@pinelake.test", "Ada Okafor", CampRole.Counsellor);
+  var ben = Person("ben@pinelake.test", "Ben Strand", CampRole.Counsellor);
+  Person("cleo@pinelake.test", "Cleo Marsh", CampRole.Cook);
+  var dana = Person("dana@pinelake.test", "Dana Reyes", CampRole.Director);
+  var pia = Person("pia@pinelake.test", "Pia Varga", CampRole.Parent);
+  var rob = Person("rob@pinelake.test", "Rob Lund", CampRole.Parent);
+  var milo = new User { Email = "milo@managed.invalid", DisplayName = "Milo Varga" };
+  var nora = new User { Email = "nora@managed.invalid", DisplayName = "Nora Lund" };
+  new CamperContact { Camper = milo, Contact = pia };
+  new CamperContact { Camper = nora, Contact = rob };
+
+  var injury = new IncidentCategory { Key = "injury", Name = "Injury", AsksAboutInjury = true, SortOrder = 1 };
+  var nearMiss = new IncidentCategory { Key = "near-miss", Name = "Near miss", SortOrder = 2 };
+  var damage = new IncidentCategory { Key = "damage", Name = "Damage to property", SortOrder = 3 };
+  new IncidentCategory { Key = "concern", Name = "Safeguarding concern", SortOrder = 4 };
+  new IncidentCategory { Key = "old", Name = "Retired category", Active = false, SortOrder = 9 };
+  var minor = new IncidentSeverity { Key = "minor", Name = "Minor", Rank = 1 };
+  new IncidentSeverity { Key = "moderate", Name = "Moderate", Rank = 2 };
+  new IncidentSeverity { Key = "major", Name = "Major", Rank = 3, ReportWithinHours = 240, Authority = "HSE (RIDDOR)" };
+  new IncidentSeverity { Key = "critical", Name = "Critical", Rank = 4, ReportWithinHours = 24, Authority = "Licensing authority" };
+
+  var knee = new IncidentReport { Reporter = ada, ReportedAt = new DateTime(2026, 7, 14, 10, 0, 0), OccurredAt = new DateTime(2026, 7, 14, 9, 40, 0),
+                                  Category = injury, Severity = minor, Location = "The jetty", Description = "Milo slipped on the wet boards and grazed his knee.",
+                                  ImmediateAction = "Cleaned and dressed by Ada; the boards were swept." };
+  new IncidentPerson { Report = knee, Person = milo, Name = "Milo Varga", Role = IncidentRole.Injured, Injury = "Graze, left knee",
+                       Treatment = IncidentTreatment.FirstAid, TreatmentNote = "Cleaned, plaster", AddedBy = ada };
+  new IncidentPerson { Report = knee, Person = ben, Name = "Ben Strand", Role = IncidentRole.Witness, AddedBy = ada };
+  new IncidentReport { Reporter = ada, ReportedAt = new DateTime(2026, 7, 12, 16, 0, 0), OccurredAt = new DateTime(2026, 7, 12, 15, 30, 0),
+                       Category = nearMiss, Location = "Canoe dock", Description = "A canoe nearly tipped over when two campers stood up.",
+                       Status = IncidentStatus.UnderReview, ReviewedBy = dana, ReviewStartedAt = new DateTime(2026, 7, 13, 9, 0, 0),
+                       ReviewNotes = "Check every buoyancy aid before the next session." };
+  new IncidentReport { Reporter = ben, ReportedAt = new DateTime(2026, 7, 14, 10, 0, 0), OccurredAt = new DateTime(2026, 7, 14, 9, 55, 0),
+                       Category = damage, Location = "Craft hut", Description = "A window broke when a ball hit it." };
+}
+
+IncidentReport At(string location) { return IncidentReport.Single(r => r.Location == location); }
+IncidentCategory Cat(string key) { return IncidentCategory.Single(c => c.Key == key); }
+IncidentSeverity Sev(string key) { return IncidentSeverity.Single(s => s.Key == key); }
+IncidentPerson Named(string location, string name) { return IncidentPerson.Single(p => p.Report.Location == location && p.Name == name); }
+int HeardCount(string what) { Background.Settle(); return Heard.Count(h => h.Event == what); }
+
+// Direct writes, as whoever calls them — what the security tests expect to be refused.
+void SetStatus(IncidentReport r, IncidentStatus s) { r.Status = s; }
+void SetNotes(IncidentReport r, string notes) { r.ReviewNotes = notes; }
+void SetDescription(IncidentReport r, string d) { r.Description = d; }
+void SetInjury(IncidentPerson p, string injury) { p.Injury = injury; }
+void SetDone(CorrectiveAction a) { a.Status = ActionStatus.Done; }
+void WriteReport(Principal reporter) {
+  new IncidentReport { Reporter = reporter, OccurredAt = DateTime.UtcNow.AddHours(-1), Category = IncidentCategory.Single(c => c.Key == "damage"),
+                       Location = "Somewhere", Description = "Written past the function" };
+}

@@ -1,0 +1,199 @@
+// The data of Osysharp.IncidentReports — what the app answers, how it configures the kit, the categories and severities
+// it defines, the report itself — and what the kit tells the app.
+
+namespace Osysharp.IncidentReports;
+
+using Osysharp.Identity;
+
+// ── what the app answers ────────────────────────────────────────────────────────────────────────────────────────────
+
+/// THE SEAM — who reviews incident reports: reads every one, classifies it, moves it through review, assigns corrective
+/// actions, tells the people who must be told, records the report to an authority, keeps the register. Nobody, until
+/// the app says: `policy ReviewsIncidents => IsSafetyLead;`. Being staff in general is not enough unless the app says so.
+virtual policy ReviewsIncidents => false;
+
+/// THE SEAM — who may file a report. Anybody signed in, until the app narrows it: `policy ReportsIncidents => IsStaff;`.
+virtual policy ReportsIncidents => IsAuthenticated;
+
+/// THE SEAM — who decides the categories and severities. Whoever reviews, until the app narrows it:
+/// `policy ManagesIncidentSetup => IsAdmin;`.
+virtual policy ManagesIncidentSetup => ReviewsIncidents;
+
+/// How the app runs incident reports — `app.Incidents = new IncidentsSetup { … }`. Every member has a working default.
+[AppSetting("Incidents")]
+public class IncidentsSetup {
+  /// How many hours before a report's deadline to an authority the app is told (`IncidentAuthorityReportDue`). 0: told
+  /// only when it is overdue.
+  public int AuthorityWarningHours = 24;
+  /// Whether a report may close while a corrective action on it is still open. Off: the close is refused, naming them.
+  public bool CloseWithOpenActions = false;
+  /// Whether the person who filed a report reads its outcome (`Outcome`) once it closes — "what we changed".
+  public bool ReportersReadOutcome = true;
+  /// Whose name an authority report and the register's export carry for the organisation — "Harbour Holiday Camp".
+  public string Organisation = "";
+}
+
+// ── what the app defines ────────────────────────────────────────────────────────────────────────────────────────────
+
+/// A kind of incident the organisation records — "Injury", "Near miss", "Damage to property", "Safeguarding concern".
+public entity IncidentCategory {
+  /// The stable key code refers to ("near-miss"); it never changes once the category exists.
+  [Required, Unique("A category with this key already exists."), Immutable, MaxLength(60)] string Key;
+  [Required, MaxLength(120)] string Name;
+  [MaxLength(500)] string Description = "";
+  /// Ask who was hurt, the injury and the treatment when a report of this category is filed.
+  bool AsksAboutInjury = false;
+  /// Retired categories are kept — reports point at them — and offered no more.
+  bool Active = true;
+  int SortOrder = 0;
+
+  security {
+    allow read when IsAuthenticated;
+    allow create, update when ManagesIncidentSetup;
+  }
+}
+
+/// How serious an incident is — "Minor", "Moderate", "Major", "Critical" — ranked, and with the hours within which an
+/// incident of that severity must be reported to an authority, when it must.
+public entity IncidentSeverity {
+  [Required, Unique("A severity with this key already exists."), Immutable, MaxLength(60)] string Key;
+  [Required, MaxLength(120)] string Name;
+  [MaxLength(500)] string Description = "";
+  /// Higher is more serious; lists and the desk order by it.
+  [Min(0), Max(100)] int Rank = 0;
+  /// An incident classified at this severity must be reported to an authority within this many hours of it being
+  /// reported here (RIDDOR's 10 days is 240, OSHA's hospitalisation 24); empty: not reportable by its severity alone.
+  [Min(1), Max(8760)] int? ReportWithinHours;
+  /// Who it is reported to — "HSE (RIDDOR)", "OSHA", "the licensing authority".
+  [MaxLength(120)] string Authority = "";
+  bool Active = true;
+
+  security {
+    allow read when IsAuthenticated;
+    allow create, update when ManagesIncidentSetup;
+  }
+}
+
+// ── the report ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Where a report stands. ⚠ Appended, never inserted.
+public enum IncidentStatus {
+  /// Filed; its author can still correct it.
+  [Label("Open")] Open,
+  /// A reviewer has taken it up; it is the record now, and only the review moves it on.
+  [Label("Under review")] UnderReview,
+  [Label("Closed")] Closed,
+}
+
+/// Where a report's own clock is — `IncidentLife` owns it.
+public enum IncidentPhase { Watching, Done }
+
+/// The running number on every report — INC-00001, INC-00002 … — what people quote.
+Counter IncidentNumber = new() { Start = 0, Format = $"INC-{Value:D5}" };
+
+/// One incident report. Read by its reporter and by whoever ReviewsIncidents — nobody else; filed by somebody who
+/// ReportsIncidents, as themself; never deleted. The reporter corrects the facts while it is Open; the review moves it on.
+[SuppressWarning("cost-row-rule-asked-of-every-caller")]   // the reporter's rule is asked of everyone who files one, by design
+public entity IncidentReport {
+  [Counter(IncidentNumber)] string Number;
+  /// Who filed it — stamped by ReportIncident from the caller, never chosen, never changed.
+  [Required, Immutable] Principal Reporter;
+  [Immutable] DateTime ReportedAt = DateTime.UtcNow;
+  [Required] DateTime OccurredAt;
+  [Required("Say what kind of incident it was.")] IncidentCategory Category;
+  IncidentSeverity? Severity;
+  [Required("Say where it happened."), MaxLength(200)] string Location;
+  [Classification(Personal.Content), Required("Describe what happened."), MaxLength(8000)] string Description;
+  /// What was done there and then — first aid given, the area closed off.
+  [Classification(Personal.Content), MaxLength(4000)] string ImmediateAction = "";
+  IncidentStatus Status = IncidentStatus.Open;
+
+  // ── the review ──
+  /// What caused it, as the review found — the reporter does not read it.
+  [MaxLength(4000)] string RootCause = "";
+  /// Internal to the reviewers: the reporter never reads them.
+  [MaxLength(8000)] string ReviewNotes = "";
+  /// What the review concluded and what changed — read by the reporter once it closes, when the app allows it.
+  [MaxLength(4000)] string Outcome = "";
+  Principal? ReviewedBy;
+  DateTime? ReviewStartedAt;
+  DateTime? ClosedAt;
+
+  // ── an authority ──
+  /// Must be reported to an authority; `AuthorityDueAt` is the deadline and `Authority` who to.
+  bool Reportable = false;
+  [MaxLength(120)] string Authority = "";
+  DateTime? AuthorityDueAt;
+  /// When it was reported, and the authority's own reference for it.
+  DateTime? ReportedToAuthorityAt;
+  [MaxLength(120)] string AuthorityReference = "";
+  /// The deadline the app was last warned about, so each warning is given once.
+  DateTime? WarnedFor;
+  /// The deadline the app was last told had passed.
+  DateTime? OverdueFor;
+  IncidentPhase Phase;          // no default — IncidentLife owns it
+
+  invariant OccurredAt <= ReportedAt.AddMinutes(5) message "An incident cannot have happened after it was reported.";
+  invariant Status != IncidentStatus.Closed || ClosedAt != null message "A closed report records when it was closed.";
+
+  security {
+    // Read: the author, and the reviewers — nobody else, in lists, counts and aggregates alike.
+    allow read when IsAuthenticated where Reporter == user;
+    allow read when ReviewsIncidents;
+    deny read ReviewNotes, RootCause when !ReviewsIncidents;
+
+    // File: only through ReportIncident, which stamps the caller as the reporter.
+    allow create when ReportsIncidents where Reporter == user && Status == IncidentStatus.Open;
+    deny create except via ReportIncident;
+
+    // Correct: the author, the facts only, while the report is still Open.
+    allow update when IsAuthenticated where Reporter == user && Status == IncidentStatus.Open;
+
+    // The review moves only inside the kit's own functions, whoever the caller is — and a reviewer never rewrites the
+    // facts the reporter gave.
+    allow update Status, Severity, RootCause, ReviewNotes, Outcome, ReviewedBy, ReviewStartedAt, ClosedAt, Reportable,
+                 Authority, AuthorityDueAt, ReportedToAuthorityAt, AuthorityReference when ReviewsIncidents;
+    deny update Status except via StartIncidentReview, CloseIncident, ReopenIncident;
+    deny update ReviewedBy except via StartIncidentReview, CloseIncident;
+    deny update ReviewStartedAt except via StartIncidentReview;
+    deny update ClosedAt except via CloseIncident, ReopenIncident;
+    deny update Severity except via ClassifyIncident;
+    deny update RootCause except via RecordIncidentFindings;
+    deny update ReviewNotes except via StartIncidentReview, RecordIncidentFindings, ReopenIncident;
+    deny update Outcome except via CloseIncident, RecordIncidentFindings;
+    deny update Reportable, Authority, AuthorityDueAt except via ClassifyIncident, MarkIncidentReportable;
+    deny update ReportedToAuthorityAt, AuthorityReference except via RecordAuthorityReport;
+    deny update WarnedFor, OverdueFor;
+    // Nobody deletes a report: there is no delete rule.
+  }
+}
+
+// ── what the kit tells the app ──────────────────────────────────────────────────────────────────────────────────────
+
+/// A report was filed — the moment to tell whoever reviews.
+[Event("Incident reported")]
+public sealed class IncidentReported { public IncidentReport Report; }
+
+/// A reviewer took a report up.
+[Event("Incident review started")]
+public sealed class IncidentReviewStarted { public IncidentReport Report; }
+
+/// A report was closed by a reviewer — its reporter may be told the outcome.
+[Event("Incident closed")]
+public sealed class IncidentClosed { public IncidentReport Report; }
+
+/// A closed report was re-opened for review.
+[Event("Incident re-opened")]
+public sealed class IncidentReopened { public IncidentReport Report; }
+
+/// A report became reportable to an authority, by its severity or by a reviewer — `Report.AuthorityDueAt` is the deadline.
+[Event("Incident reportable")]
+public sealed class IncidentReportable { public IncidentReport Report; }
+
+/// A reportable incident's deadline is near (`IncidentsSetup.AuthorityWarningHours`) and it has not been reported.
+[Event("Incident due to an authority")]
+public sealed class IncidentAuthorityReportDue { public IncidentReport Report; }
+
+/// A reportable incident's deadline passed and it has not been reported.
+[Event("Incident overdue to an authority")]
+public sealed class IncidentAuthorityReportOverdue { public IncidentReport Report; }

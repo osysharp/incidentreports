@@ -1,0 +1,765 @@
+// The kit's pages, served at its routes in every app that uses it — in the app's own shell and theme:
+//
+//     /incidents                       MyIncidentsPage           report one; your reports, actions, statements and notices
+//     /staff/incidents                 IncidentsDeskPage         the review desk
+//     /staff/incidents/register        IncidentRegisterPage      the register and its export
+//     /staff/incidents/setup           IncidentSetupPage         the categories and severities
+//
+// ⚑ AN APP TAKES ONE OVER by declaring a component of the same name — with a `[Route]` of its own it is served there
+//   instead; without one, the address is not served. The parts (`MyIncidents`, `ReportIncidentForm`, `IncidentsDesk`,
+//   `IncidentDetail`, `IncidentRegisterView`, `IncidentSetup`) are `[Composable]`: place them on a page of your own.
+//   Every colour, face and size is a theme token, so a look re-skins them.
+
+namespace Osysharp.IncidentReports;
+
+using Osysharp.Identity;
+using Osysharp.Storage;
+using Osysharp.Ui;
+
+// ── the pages ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The signed-in person's side.
+[Route("/incidents")] [Layout(WorkspaceFrame)] [Authorize] [Render(CSR)] [Title("Incidents")]
+[Nav("Incidents", Order = 70)]
+public component MyIncidentsPage() {
+  render {
+    Stack(gap: 6, w: "100%", maxW: "1000px") {
+      PageHead("Incidents", subtitle: "Report what happened. Only you and the people who review incidents can read your reports.");
+      MyIncidents();
+    }
+  }
+}
+
+/// The review desk.
+[Route("/staff/incidents")] [Layout(WorkspaceFrame)] [Authorize(ReviewsIncidents)] [Render(CSR)] [Title("Incident review")]
+[Nav("Incident review", Order = 71)]
+public component IncidentsDeskPage() {
+  render {
+    Stack(gap: 6, w: "100%", maxW: "1280px") {
+      PageHead("Incident review", subtitle: "What waits for review, what must go to an authority, and actions running late.");
+      IncidentsDesk();
+    }
+  }
+}
+
+/// The register.
+[Route("/staff/incidents/register")] [Layout(WorkspaceFrame)] [Authorize(ReviewsIncidents)] [Render(CSR)] [Title("Incident register")]
+public component IncidentRegisterPage() {
+  render {
+    Stack(gap: 6, w: "100%", maxW: "1280px") {
+      PageHead("Incident register", subtitle: "Every incident in a period, one line each — and the file to send on.");
+      IncidentRegisterView();
+    }
+  }
+}
+
+/// The categories and severities.
+[Route("/staff/incidents/setup")] [Layout(WorkspaceFrame)] [Authorize(ManagesIncidentSetup)] [Render(CSR)] [Title("Incident categories")]
+public component IncidentSetupPage() {
+  render {
+    Stack(gap: 6, w: "100%", maxW: "1000px") {
+      PageHead("Incident categories", subtitle: "What kinds of incident you record, and how serious each can be.");
+      IncidentSetup();
+    }
+  }
+}
+
+// ── the person's side ───────────────────────────────────────────────────────────────────────────────────────────────
+
+/// A titled list of reports; `onOpen` opens one.
+[Composable, Part]
+public component IncidentRows(string title, List<IncidentRow> rows, string empty, Action<IncidentRow> onOpen) {
+  render {
+    Stack(gap: 2) {
+      SectionLabel(title);
+      Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden, role: UiRole.List, label: title) {
+        if (rows.Count == 0) { Box(p: 4) { Text(empty, color: Colors.TextMuted); } }
+        foreach (var r in rows) {
+          Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: r.Number) {
+            Stack(gap: 0, grow: 1, minW: "0") {
+              Text(r.Title, fontWeight: FontWeight.Medium);
+              Text(r.Detail, fontSize: FontSize.Caption, color: Colors.TextMuted);
+            }
+            if (r.Flag) { Badge("To an authority", tone: Tone.Warning); }
+            if (r.Severity != "") { Badge(r.Severity, tone: r.Rank >= 3 ? Tone.Danger : Tone.Ghost); }
+            Badge(r.Status, tone: r.State == IncidentStatus.Closed ? Tone.Success : r.State == IncidentStatus.UnderReview ? Tone.Primary : Tone.Warning);
+            Button("Open", onPress: () => onOpen(r), size: Size.Sm, tone: Tone.Ghost);
+          }
+        }
+      }
+    }
+  }
+}
+
+/// The form a report is filed with — what kind, when, where, what happened, what was done, who was hurt (when the
+/// category asks) and photos. `onFiled` hears the report filed. In a test: `Ui.Select("What kind", …); Ui.Fill("Where", …)`.
+[Composable]
+[Authorize(ReportsIncidents)]
+public component ReportIncidentForm(Action<IncidentReport> onFiled, Action onCancel) {
+  List<IncidentCategory> categories = [];
+  IncidentCategory? category = null;
+  DateTime when = DateTime.UtcNow;
+  string where = "";
+  string what = "";
+  string done = "";
+  string hurtName = "";
+  string injury = "";
+  IncidentTreatment treatment = IncidentTreatment.FirstAid;
+  string witness = "";
+  List<UploadedFile> files = [];
+  string problem = "";
+
+  on mount {
+    categories = IncidentCategory.Where(c => c.Active).OrderBy(c => c.SortOrder).ThenBy(c => c.Name).Take(50).ToList();
+  }
+  action Took(UploadedFile f) { var next = files.ToList(); next.Add(f); files = next; }
+  action File() {
+    problem = "";
+    if (category == null) { problem = "Say what kind of incident it was."; return; }
+    try {
+      var r = ReportIncident(category!, when, where, what, done);
+      if (hurtName.Trim() != "") { AddIncidentPerson(r, IncidentRole.Injured, null, hurtName, injury, treatment); }
+      if (witness.Trim() != "") { AddIncidentPerson(r, IncidentRole.Witness, null, witness); }
+      foreach (var f in files) { AttachIncidentFile(r, KeepIncidentFile(f)); }
+      onFiled(r);
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+
+  render {
+    Stack(gap: 4) {
+      Dropdown("What kind", value: category, options: categories, placeholder: "Choose") { c => Text(c.Name); }
+      Row(gap: 3, wrap: Wrapping.Wrap) {
+        Box(w: "260px") { DateTimePicker("When it happened", value: when); }
+        Box(grow: 1, minW: "220px") { Field("Where", value: where, placeholder: "The place, as precisely as you can"); }
+      }
+      TextAreaField("What happened", value: what, rows: 4, placeholder: "In order, as you saw it.");
+      TextAreaField("What was done there and then", value: done, rows: 2, placeholder: "First aid, the area closed off, who was called.");
+      if (category != null && category!.AsksAboutInjury) {
+        Stack(gap: 3, p: 4, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Md, role: UiRole.Region, label: "Who was hurt") {
+          SectionLabel("Who was hurt");
+          Row(gap: 3, wrap: Wrapping.Wrap) {
+            Box(grow: 1, minW: "200px") { Field("Their name", value: hurtName); }
+            Box(grow: 1, minW: "200px") { Field("The injury", value: injury, placeholder: "What, and where on the body"); }
+          }
+          Dropdown("Care given", value: treatment, options: IncidentTreatment.Members) { t => Text(t.Label); }
+        }
+      }
+      Field("A witness", value: witness, placeholder: "Their name, if somebody saw it");
+      Upload(privately: true, accept: "image/*,video/*,application/pdf", onUploaded: Took) {
+        Row(gap: 2, align: Align.Center, p: 3, borderW: 1, border: Colors.Border, rounded: Radius.Md) {
+          Text("Add a photo", fontWeight: FontWeight.Medium, color: Colors.Primary);
+          Text("A picture, a video or a PDF", fontSize: FontSize.Caption, color: Colors.TextMuted);
+        }
+      }
+      foreach (var f in files) { Text(f.FileName, fontSize: FontSize.Caption, color: Colors.TextSecondary); }
+      if (problem != "") { Alert(problem, tone: Tone.Danger); }
+      Row(gap: 2, justify: Justify.End) {
+        Button("Cancel", onPress: onCancel, tone: Tone.Ghost);
+        Button("File the report", onPress: File, tone: Tone.Primary);
+      }
+    }
+  }
+}
+
+/// The signed-in person's side: report an incident, read your reports, do your actions, write the statements asked of
+/// you and acknowledge what you were told. In a test: `Ui.Click("Report an incident")`, `Ui.Click("Acknowledge")`.
+[Composable]
+public component MyIncidents() {
+  MyIncidentsView view = new MyIncidentsView();
+  bool reporting = false;
+  IncidentCard? open = null;
+  IncidentActionLine? doing = null;
+  IncidentNotice? reading = null;
+  IncidentPerson? stating = null;
+  string text = "";
+  string done = "";
+  string problem = "";
+
+  on mount { Load(); }
+  action Load() { view = MyIncidentsNow(); }
+  action StartReport() { reporting = true; done = ""; }
+  action StopReport() { reporting = false; }
+  action Filed(IncidentReport r) { reporting = false; done = $"{r.Number} is filed. The people who review incidents can read it now."; Load(); }
+  action Open(IncidentRow r) { open = IncidentCardOf(r.Id); }
+  action Close() { open = null; }
+  action StartDo(IncidentActionLine a) { doing = a; text = ""; problem = ""; }
+  action Do() {
+    problem = "";
+    try { CompleteCorrectiveAction(CorrectiveAction.Single(a => a.Id == doing!.Id), text); done = $"“{doing!.What}” is done."; doing = null; Load(); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+  action StartRead(IncidentNotice n) { reading = n; text = ""; problem = ""; }
+  action Acknowledge() {
+    try { AcknowledgeIncidentNotice(reading!, text); done = "Thank you — it is acknowledged."; reading = null; Load(); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+  action StartStatement(IncidentPerson p) { stating = p; text = ""; problem = ""; }
+  action State() {
+    problem = "";
+    try { GiveStatement(stating!, text); done = "Your statement is kept."; stating = null; Load(); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+
+  render {
+    Stack(gap: 6) {
+      if (done != "") { Alert(done, tone: Tone.Success); }
+      if (view.Reports) {
+        Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap, p: 5, bg: Colors.Primary.Subtle, rounded: Radius.Lg) {
+          Stack(gap: 0, grow: 1, minW: "0") {
+            Text("Something happened?", fontSize: FontSize.Heading, fontWeight: FontWeight.Semibold);
+            Text("An injury, a near miss, damage, a concern — report it while it is fresh.", color: Colors.TextSecondary);
+          }
+          Button("Report an incident", onPress: StartReport, tone: Tone.Primary);
+        }
+      }
+      if (view.Notices.Count > 0) {
+        Stack(gap: 2) {
+          SectionLabel("Told to you");
+          Stack(gap: 3, role: UiRole.List, label: "Told to you") {
+            foreach (var n in view.Notices) {
+              Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap, p: 4, bg: n.AcknowledgedAt == null ? Colors.Warning.Subtle : Colors.Surface,
+                  borderW: 1, border: Colors.Border, rounded: Radius.Lg, role: UiRole.ListItem, label: n.Summary.Split("\n")[0]) {
+                Stack(gap: 0, grow: 1, minW: "0") {
+                  Text(n.Summary.Split("\n")[0], fontWeight: FontWeight.Medium);
+                  Text(n.AcknowledgedAt == null ? "Told on " + n.SentAt.ToString("d MMM yyyy") : "Acknowledged on " + n.AcknowledgedAt!.Value.ToString("d MMM yyyy"),
+                       fontSize: FontSize.Caption, color: Colors.TextMuted);
+                }
+                Button(n.AcknowledgedAt == null ? "Read and acknowledge" : "Read", onPress: () => StartRead(n), size: Size.Sm,
+                       tone: n.AcknowledgedAt == null ? Tone.Primary : Tone.Ghost);
+              }
+            }
+          }
+        }
+      }
+      if (view.Statements.Count > 0) {
+        Stack(gap: 2) {
+          SectionLabel("Statements asked of you");
+          Stack(gap: 3, role: UiRole.List, label: "Statements asked of you") {
+            foreach (var p in view.Statements) {
+              Row(gap: 3, align: Align.Center, p: 4, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, role: UiRole.ListItem, label: p.Role.Label) {
+                Text("You are named as " + p.Role.Label.ToLower() + " in an incident.", grow: 1);
+                Button("Write your statement", onPress: () => StartStatement(p), size: Size.Sm, tone: Tone.Primary);
+              }
+            }
+          }
+        }
+      }
+      if (view.Actions.Count > 0) {
+        Stack(gap: 2) {
+          SectionLabel("Your actions");
+          Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden, role: UiRole.List, label: "Your actions") {
+            foreach (var a in view.Actions) {
+              Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: a.What) {
+                Stack(gap: 0, grow: 1, minW: "0") {
+                  Text(a.What, fontWeight: FontWeight.Medium);
+                  Text(a.About + " · due " + a.Due, fontSize: FontSize.Caption, color: a.Overdue ? Colors.Danger : Colors.TextMuted);
+                }
+                Button("Mark done", onPress: () => StartDo(a), size: Size.Sm);
+              }
+            }
+          }
+        }
+      }
+      IncidentRows("Your reports", view.Filed, "You have not reported anything.", Open);
+    }
+    if (reporting) {
+      Dialog("Report an incident", onDismiss: StopReport, subtitle: "Only you and the people who review incidents read it.") {
+        ReportIncidentForm(onFiled: Filed, onCancel: StopReport);
+      }
+    }
+    if (open != null) {
+      Dialog(open!.Number + " · " + open!.Category, onDismiss: Close, subtitle: open!.When + " · " + open!.Where) {
+        IncidentDetail(open!.Id, onChanged: () => { open = IncidentCardOf(open!.Id); Load(); });
+      }
+    }
+    if (doing != null) {
+      Dialog("Mark done: " + doing!.What, onDismiss: () => { doing = null; }, subtitle: doing!.About) {
+        TextAreaField("What was done", value: text, rows: 3);
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: () => { doing = null; }, tone: Tone.Ghost);
+          Button("Mark it done", onPress: Do, tone: Tone.Primary);
+        }
+      }
+    }
+    if (reading != null) {
+      Dialog("What happened", onDismiss: () => { reading = null; }, subtitle: "Told on " + reading!.SentAt.ToString("d MMMM yyyy")) {
+        Box(p: 4, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Md, role: UiRole.Region, label: "The notice") {
+          Text(reading!.Summary, whiteSpace: WhiteSpace.PreWrap);
+        }
+        if (reading!.AcknowledgedAt == null) {
+          TextAreaField("Anything you want to say back", value: text, rows: 2);
+          if (problem != "") { Alert(problem, tone: Tone.Danger); }
+          Row(gap: 2, justify: Justify.End) { Button("Acknowledge", onPress: Acknowledge, tone: Tone.Primary); }
+        } else {
+          if (reading!.Response != "") { Text("You said: " + reading!.Response, fontSize: FontSize.Caption, color: Colors.TextSecondary); }
+        }
+      }
+    }
+    if (stating != null) {
+      Dialog("Your statement", onDismiss: () => { stating = null; }, subtitle: "What you saw, in your own words. The people who review incidents read it.") {
+        TextAreaField("Statement", value: text, rows: 6);
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: () => { stating = null; }, tone: Tone.Ghost);
+          Button("Keep my statement", onPress: State, tone: Tone.Primary);
+        }
+      }
+    }
+  }
+}
+
+// ── one report ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// One report: what happened, the people in it, the files — and, for a reviewer, the review: classify, findings,
+/// actions, telling people, the authority, closing. `onChanged` hears anything done here.
+[Composable]
+public component IncidentDetail(Guid report, Action onChanged, bool heading = false) {
+  IncidentCard card = new IncidentCard();
+  List<IncidentSeverity> severities = [];
+  string done = "";
+  string problem = "";
+  // adding a person
+  bool adding = false;
+  string personName = "";
+  IncidentRole personRole = IncidentRole.Witness;
+  string personInjury = "";
+  IncidentTreatment personCare = IncidentTreatment.None;
+  // the review
+  IncidentSeverity? severity = null;
+  string cause = "";
+  string outcome = "";
+  bool assigning = false;
+  string actionWhat = "";
+  Principal? actionOwner = null;
+  List<Principal> staff = [];
+  DateOnly? actionDue = null;
+  bool toAuthority = false;
+  string authorityRef = "";
+  string authorityName = "";
+  DateTime authorityDue = DateTime.UtcNow.AddDays(1);
+  bool reopening = false;
+  string why = "";
+
+  on mount { Load(); }
+  action Load() {
+    card = IncidentCardOf(report);
+    if (card.Review) {
+      severities = IncidentSeverity.Where(s => s.Active).OrderBy(s => s.Rank).Take(20).ToList();
+      cause = card.RootCause;
+      outcome = card.Outcome;
+    }
+  }
+  action Changed(string what) { done = what; problem = ""; Load(); onChanged(); }
+  action Fail(Exception ex) { problem = ex.Message; }
+  action Took(UploadedFile f) {
+    try { AttachIncidentFile(IncidentReport.Single(r => r.Id == report), KeepIncidentFile(f)); Changed("The file is added."); } catch (Exception ex) { Fail(ex); }
+  }
+  action AddPerson() {
+    try {
+      AddIncidentPerson(IncidentReport.Single(r => r.Id == report), personRole, null, personName, personInjury, personCare);
+      adding = false; personName = ""; personInjury = "";
+      Changed("They are added.");
+    } catch (Exception ex) { Fail(ex); }
+  }
+  action StartReview() { try { StartIncidentReview(IncidentReport.Single(r => r.Id == report)); Changed("The review has started."); } catch (Exception ex) { Fail(ex); } }
+  action Classify() {
+    if (severity == null) { problem = "Choose a severity."; return; }
+    try { ClassifyIncident(IncidentReport.Single(r => r.Id == report), severity!); Changed($"Classified as {severity!.Name}."); } catch (Exception ex) { Fail(ex); }
+  }
+  action SaveFindings() {
+    try { RecordIncidentFindings(IncidentReport.Single(r => r.Id == report), cause, outcome); Changed("The findings are kept."); } catch (Exception ex) { Fail(ex); }
+  }
+  action StartAssign() {
+    staff = Principal.Where(p => p.DisplayName != null).OrderBy(p => p.DisplayName).Take(200).ToList();
+    actionWhat = ""; actionOwner = null; actionDue = null; assigning = true; problem = "";
+  }
+  action Assign() {
+    if (actionOwner == null || actionDue == null) { problem = "Say who does it and by when."; return; }
+    try { AssignCorrectiveAction(IncidentReport.Single(r => r.Id == report), actionWhat, actionOwner!, actionDue!.Value); assigning = false; Changed("The action is set."); }
+    catch (Exception ex) { Fail(ex); }
+  }
+  action Tell(IncidentPersonLine p, IncidentContactLine c) {
+    try { InformAboutIncident(IncidentPerson.Single(x => x.Id == p.Id), Principal.Single(x => x.Id == c.Id)); Changed($"{c.Name} is told about {p.Name}."); }
+    catch (Exception ex) { Fail(ex); }
+  }
+  action StartAuthority() { toAuthority = true; authorityRef = ""; authorityName = ""; authorityDue = DateTime.UtcNow.AddDays(1); problem = ""; }
+  action RecordAuthority() {
+    try { RecordAuthorityReport(IncidentReport.Single(r => r.Id == report), authorityRef); toAuthority = false; Changed("The report to the authority is recorded."); }
+    catch (Exception ex) { Fail(ex); }
+  }
+  action MarkReportable() {
+    try { MarkIncidentReportable(IncidentReport.Single(r => r.Id == report), true, authorityName, authorityDue); toAuthority = false; Changed("It must now be reported."); }
+    catch (Exception ex) { Fail(ex); }
+  }
+  action Close() {
+    try { CloseIncident(IncidentReport.Single(r => r.Id == report), outcome); Changed("The report is closed."); } catch (Exception ex) { Fail(ex); }
+  }
+  action Reopen() {
+    try { ReopenIncident(IncidentReport.Single(r => r.Id == report), why); reopening = false; Changed("The report is re-opened."); } catch (Exception ex) { Fail(ex); }
+  }
+
+  render {
+    Stack(gap: 5, role: UiRole.Region, label: card.Number) {
+      if (heading) {
+        Stack(gap: 0) {
+          Text(card.Number + " · " + card.Category, fontSize: FontSize.Heading, fontWeight: FontWeight.Semibold);
+          Text(card.When + " · " + card.Where, fontSize: FontSize.Caption, color: Colors.TextMuted);
+        }
+      }
+      Row(gap: 2, wrap: Wrapping.Wrap) {
+        Badge(card.Status.Label, tone: card.Status == IncidentStatus.Closed ? Tone.Success : card.Status == IncidentStatus.UnderReview ? Tone.Primary : Tone.Warning);
+        if (card.Severity != "") { Badge(card.Severity, tone: Tone.Ghost); }
+        if (card.AuthorityLine != "") { Badge(card.AuthorityLine, tone: card.AuthorityOverdue ? Tone.Danger : card.AwaitingAuthority ? Tone.Warning : Tone.Success); }
+      }
+      if (done != "") { Alert(done, tone: Tone.Success); }
+      if (problem != "") { Alert(problem, tone: Tone.Danger); }
+      Stack(gap: 1) {
+        SectionLabel("What happened");
+        Text(card.Description, whiteSpace: WhiteSpace.PreWrap);
+        if (card.ImmediateAction != "") { Text("Done there and then: " + card.ImmediateAction, fontSize: FontSize.Caption, color: Colors.TextSecondary); }
+        Text("Reported by " + card.ReportedBy, fontSize: FontSize.Caption, color: Colors.TextMuted);
+      }
+      if (card.Outcome != "" && !card.Review) {
+        Stack(gap: 1, p: 4, bg: Colors.Success.Subtle, rounded: Radius.Md) {
+          Text("What changed", fontWeight: FontWeight.Semibold);
+          Text(card.Outcome);
+        }
+      }
+      Stack(gap: 2) {
+        Row(gap: 2, align: Align.Center) {
+          Box(grow: 1) { SectionLabel("People"); }
+          if (card.CanAdd) { Button("Add a person", onPress: () => { adding = true; }, size: Size.Sm, tone: Tone.Ghost); }
+        }
+        Stack(gap: 2, role: UiRole.List, label: "People") {
+          if (card.People.Count == 0) { Text("Nobody named yet.", color: Colors.TextMuted); }
+          foreach (var p in card.People) {
+            Stack(gap: 1, p: 3, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Md, role: UiRole.ListItem, label: p.Name) {
+              Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap) {
+                Text(p.Name, fontWeight: FontWeight.Medium, grow: 1);
+                Badge(p.Role, tone: p.Hurt ? Tone.Danger : Tone.Ghost);
+              }
+              if (p.Injury != "") { Text("Injury: " + p.Injury, fontSize: FontSize.Caption, color: Colors.TextSecondary); }
+              if (p.Care != "") { Text("Care: " + p.Care, fontSize: FontSize.Caption, color: Colors.TextSecondary); }
+              if (p.Statement != "") { Text("“" + p.Statement + "”", fontSize: FontSize.Caption, color: Colors.TextSecondary); }
+              foreach (var t in p.Told) { Text("Told: " + t, fontSize: FontSize.Caption, color: Colors.TextMuted); }
+              if (p.ToTell.Count > 0 && card.Status != IncidentStatus.Closed) {
+                Row(gap: 2, wrap: Wrapping.Wrap) {
+                  foreach (var c in p.ToTell) { Button("Tell " + c.Name, onPress: () => Tell(p, c), size: Size.Sm, tone: Tone.Primary); }
+                }
+              }
+            }
+          }
+        }
+      }
+      Stack(gap: 2) {
+        SectionLabel("Photos and files");
+        Row(gap: 3, wrap: Wrapping.Wrap) {
+          if (card.Files.Count == 0) { Text("None.", color: Colors.TextMuted); }
+          foreach (var f in card.Files) {
+            Link(fileAsset: f.File, color: Colors.Primary, fontSize: FontSize.Caption, fontWeight: FontWeight.Semibold) { Text(f.Name); }
+          }
+        }
+        if (card.CanAdd) {
+          Upload(privately: true, accept: "image/*,video/*,application/pdf", onUploaded: Took) {
+            Row(gap: 2, align: Align.Center, p: 3, borderW: 1, border: Colors.Border, rounded: Radius.Md) {
+              Text("Add a photo", fontWeight: FontWeight.Medium, color: Colors.Primary);
+            }
+          }
+        }
+      }
+      if (card.Review) {
+        Stack(gap: 4, p: 4, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, role: UiRole.Region, label: "The review") {
+          SectionLabel("The review");
+          if (card.Status == IncidentStatus.Open) { Row() { Button("Start the review", onPress: StartReview, tone: Tone.Primary, size: Size.Sm); } }
+          Row(gap: 2, align: Align.End, wrap: Wrapping.Wrap) {
+            Box(w: "240px") { Dropdown("Severity", value: severity, options: severities, placeholder: card.Severity == "" ? "Choose" : card.Severity) { s => Text(s.Name); } }
+            Button("Classify", onPress: Classify, size: Size.Sm);
+          }
+          if (card.ReviewNotes != "") { Text("Notes: " + card.ReviewNotes, fontSize: FontSize.Caption, color: Colors.TextSecondary, whiteSpace: WhiteSpace.PreWrap); }
+          TextAreaField("What caused it", value: cause, rows: 2);
+          TextAreaField("Outcome — what the reporter reads once it closes", value: outcome, rows: 2);
+          Row(gap: 2, justify: Justify.End) { Button("Keep the findings", onPress: SaveFindings, size: Size.Sm); }
+          Stack(gap: 2) {
+            Row(gap: 2, align: Align.Center) {
+              Box(grow: 1) { SectionLabel("Corrective actions"); }
+              if (card.Status != IncidentStatus.Closed) { Button("Add an action", onPress: StartAssign, size: Size.Sm, tone: Tone.Ghost); }
+            }
+            Stack(gap: 0, role: UiRole.List, label: "Corrective actions") {
+              if (card.Actions.Count == 0) { Text("None yet.", color: Colors.TextMuted); }
+              foreach (var a in card.Actions) {
+                Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: a.What) {
+                  Stack(gap: 0, grow: 1, minW: "0") {
+                    Text(a.What, fontWeight: FontWeight.Medium);
+                    Text(a.Owner + " · due " + a.Due + (a.Note != "" ? " · " + a.Note : ""), fontSize: FontSize.Caption, color: a.Overdue ? Colors.Danger : Colors.TextMuted);
+                  }
+                  Badge(a.Overdue ? "Overdue" : a.Status, tone: a.Overdue ? Tone.Danger : a.Open ? Tone.Warning : Tone.Success);
+                }
+              }
+            }
+          }
+          Row(gap: 2, wrap: Wrapping.Wrap, justify: Justify.End) {
+            if (card.AwaitingAuthority) { Button("Record the report to the authority", onPress: StartAuthority, size: Size.Sm); }
+            if (card.AuthorityLine == "" && card.Status != IncidentStatus.Closed) { Button("Must be reported", onPress: StartAuthority, size: Size.Sm, tone: Tone.Ghost); }
+            if (card.Status == IncidentStatus.UnderReview) { Button("Close the report", onPress: Close, size: Size.Sm, tone: Tone.Primary); }
+            if (card.Status == IncidentStatus.Closed) { Button("Re-open", onPress: () => { reopening = true; why = ""; }, size: Size.Sm, tone: Tone.Ghost); }
+          }
+        }
+      }
+    }
+    if (adding) {
+      Dialog("Add a person", onDismiss: () => { adding = false; }, subtitle: "Somebody hurt, involved, or who saw it.") {
+        Field("Their name", value: personName);
+        Dropdown("Their part", value: personRole, options: IncidentRole.Members) { r => Text(r.Label); }
+        if (personRole == IncidentRole.Injured) {
+          Field("The injury", value: personInjury);
+          Dropdown("Care given", value: personCare, options: IncidentTreatment.Members) { t => Text(t.Label); }
+        }
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: () => { adding = false; }, tone: Tone.Ghost);
+          Button("Add them", onPress: AddPerson, tone: Tone.Primary);
+        }
+      }
+    }
+    if (assigning) {
+      Dialog("Add an action", onDismiss: () => { assigning = false; }, subtitle: "What will stop it happening again — who does it, by when.") {
+        Field("What is to be done", value: actionWhat);
+        Row(gap: 3, wrap: Wrapping.Wrap) {
+          Box(grow: 1, minW: "220px") { Dropdown("Who does it", value: actionOwner, options: staff, placeholder: "Choose") { p => Text(p.DisplayName ?? ""); } }
+          Box(w: "200px") { DatePicker("Due", value: actionDue); }
+        }
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: () => { assigning = false; }, tone: Tone.Ghost);
+          Button("Set the action", onPress: Assign, tone: Tone.Primary);
+        }
+      }
+    }
+    if (toAuthority) {
+      Dialog(card.AwaitingAuthority ? "Reported to the authority" : "Must be reported", onDismiss: () => { toAuthority = false; },
+             subtitle: card.AwaitingAuthority ? card.AuthorityLine : "To whom, and by when.") {
+        if (card.AwaitingAuthority) {
+          Field("The authority's reference", value: authorityRef);
+          if (problem != "") { Alert(problem, tone: Tone.Danger); }
+          Row(gap: 2, justify: Justify.End) { Button("Record it", onPress: RecordAuthority, tone: Tone.Primary); }
+        } else {
+          Field("Reported to", value: authorityName, placeholder: "The authority");
+          DateTimePicker("By", value: authorityDue);
+          if (problem != "") { Alert(problem, tone: Tone.Danger); }
+          Row(gap: 2, justify: Justify.End) { Button("Mark it", onPress: MarkReportable, tone: Tone.Primary); }
+        }
+      }
+    }
+    if (reopening) {
+      Dialog("Re-open " + card.Number, onDismiss: () => { reopening = false; }) {
+        Field("Why", value: why);
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) { Button("Re-open it", onPress: Reopen, tone: Tone.Primary); }
+      }
+    }
+  }
+}
+
+// ── the desk ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The review desk: the figures, what waits for review, what is under review, what must go to an authority, actions
+/// running late — and one report open beside them. In a test: `Ui.Click("Open", within: "INC-00001")`.
+[Composable]
+[Authorize(ReviewsIncidents)]
+public component IncidentsDesk() {
+  IncidentDeskView view = new IncidentDeskView();
+  Guid open = Guid.Empty;
+  string openTitle = "";
+  string openDetail = "";
+
+  on mount { Load(); }
+  action Load() { view = IncidentDeskNow(); }
+  action Open(IncidentRow r) { open = r.Id; openTitle = r.Title; openDetail = r.Detail; }
+  action Close() { open = Guid.Empty; Load(); }
+
+  render {
+    Stack(gap: 6) {
+      Row(gap: 6, wrap: Wrapping.Wrap) {
+        Metric("waiting for review", text: view.Figures.Open.ToString());
+        Metric("under review", text: view.Figures.UnderReview.ToString());
+        Metric("due to an authority", text: view.Figures.AwaitingAuthority.ToString());
+        Metric("actions overdue", text: view.Figures.OverdueActions.ToString());
+      }
+      if (view.Figures.ByCategory.Count > 0) {
+        Text("Last 90 days — " + string.Join(" · ", view.Figures.ByCategory), fontSize: FontSize.Caption, color: Colors.TextMuted);
+      }
+      Stack(gap: 5, w: "100%") {
+          if (view.ToAuthority.Count > 0) { IncidentRows("Due to an authority", view.ToAuthority, "", Open); }
+          IncidentRows("Waiting for review", view.Open, "Nothing waits.", Open);
+          IncidentRows("Under review", view.UnderReview, "Nothing is under review.", Open);
+          if (view.OverdueActions.Count > 0) {
+            Stack(gap: 2) {
+              SectionLabel("Actions overdue");
+              Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden, role: UiRole.List, label: "Actions overdue") {
+                foreach (var a in view.OverdueActions) {
+                  Row(gap: 3, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: a.What) {
+                    Stack(gap: 0, grow: 1, minW: "0") {
+                      Text(a.What, fontWeight: FontWeight.Medium);
+                      Text(a.About + " · " + a.Owner + " · due " + a.Due, fontSize: FontSize.Caption, color: Colors.Danger);
+                    }
+                  }
+                }
+              }
+            }
+          }
+      }
+    }
+    if (open != Guid.Empty) {
+      Dialog(openTitle, onDismiss: Close, subtitle: openDetail) {
+        IncidentDetail(open, onChanged: Load);
+      }
+    }
+  }
+}
+
+// ── the register ────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The register for a period, and its CSV. In a test: `Ui.Fill("From", "2026-07-01"); Ui.Click("Show")`.
+[Composable]
+[Authorize(ReviewsIncidents)]
+public component IncidentRegisterView() {
+  DateOnly? from = null;
+  DateOnly? to = null;
+  List<IncidentRegisterRow> rows = [];
+  string link = "";
+
+  on mount {
+    var today = DateOnly.FromDateTime(DateTime.UtcNow);
+    from = today.AddDays(-30);
+    to = today;
+    Load();
+  }
+  action Load() { rows = IncidentRegister(from ?? DateOnly.FromDateTime(DateTime.UtcNow), to ?? DateOnly.FromDateTime(DateTime.UtcNow)); link = ""; }
+  action Export() { link = IncidentRegisterFileLink(from ?? DateOnly.FromDateTime(DateTime.UtcNow), to ?? DateOnly.FromDateTime(DateTime.UtcNow)); }
+
+  render {
+    Stack(gap: 4) {
+      Row(gap: 3, align: Align.End, wrap: Wrapping.Wrap) {
+        Box(w: "200px") { DatePicker("From", value: from); }
+        Box(w: "200px") { DatePicker("To", value: to); }
+        Button("Show", onPress: Load, size: Size.Sm);
+        Button("Export as CSV", onPress: Export, size: Size.Sm, tone: Tone.Ghost);
+        if (link != "") { TextLink("Download the register", to: link); }
+      }
+      DataGrid(label: "Register", rows: rows, columns: [
+        new GridColumn<IncidentRegisterRow> { Name = "Number", Label = "No.", Value = r => r.Number, Width = 110 },
+        new GridColumn<IncidentRegisterRow> { Name = "When", Label = "When", Value = r => IncidentWhen(r.OccurredAt), Width = 170 },
+        new GridColumn<IncidentRegisterRow> { Name = "Category", Label = "Category", Value = r => r.Category, Width = 150 },
+        new GridColumn<IncidentRegisterRow> { Name = "Severity", Label = "Severity", Value = r => r.Severity, Width = 110 },
+        new GridColumn<IncidentRegisterRow> { Name = "Where", Label = "Where", Value = r => r.Location, Width = 160 },
+        new GridColumn<IncidentRegisterRow> { Name = "Hurt", Label = "Hurt", Value = r => r.Hurt, Width = 220 },
+        new GridColumn<IncidentRegisterRow> { Name = "Status", Label = "Status", Value = r => r.Status, Width = 120 },
+        new GridColumn<IncidentRegisterRow> { Name = "Authority", Label = "Authority", Value = r => r.Authority, Width = 220 },
+      ]);
+    }
+  }
+}
+
+// ── the setup ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The categories and severities, and adding one. In a test: `Ui.Click("Add a category"); Ui.Fill("Key", "illness")`.
+[Composable]
+[Authorize(ManagesIncidentSetup)]
+public component IncidentSetup() {
+  List<IncidentCategory> categories = [];
+  List<IncidentSeverity> severities = [];
+  bool addingCategory = false;
+  bool addingSeverity = false;
+  string key = "";
+  string name = "";
+  bool asksAboutInjury = false;
+  int rank = 1;
+  int hours = 0;
+  string authority = "";
+  string done = "";
+  string problem = "";
+
+  on mount { Load(); }
+  action Load() {
+    categories = IncidentCategory.OrderBy(c => c.SortOrder).ThenBy(c => c.Name).Take(100).ToList();
+    severities = IncidentSeverity.OrderBy(s => s.Rank).Take(50).ToList();
+  }
+  action StartCategory() { key = ""; name = ""; asksAboutInjury = false; problem = ""; addingCategory = true; }
+  action StartSeverity() { key = ""; name = ""; rank = severities.Count + 1; hours = 0; authority = ""; problem = ""; addingSeverity = true; }
+  action SaveCategory() {
+    try {
+      new IncidentCategory { Key = key.Trim().ToLower(), Name = name.Trim(), AsksAboutInjury = asksAboutInjury, SortOrder = categories.Count + 1 };
+      UnitOfWork.Commit();
+      done = $"{name.Trim()} is added."; addingCategory = false; Load();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action SaveSeverity() {
+    try {
+      new IncidentSeverity { Key = key.Trim().ToLower(), Name = name.Trim(), Rank = rank, ReportWithinHours = hours > 0 ? hours : null, Authority = authority.Trim() };
+      UnitOfWork.Commit();
+      done = $"{name.Trim()} is added."; addingSeverity = false; Load();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action Toggle(IncidentCategory c) { c.Active = !c.Active; UnitOfWork.Commit(); Load(); }
+
+  render {
+    Stack(gap: 6) {
+      if (done != "") { Alert(done, tone: Tone.Success); }
+      Stack(gap: 2) {
+        Row(gap: 2, align: Align.Center) {
+          Box(grow: 1) { SectionLabel("Categories"); }
+          Button("Add a category", onPress: StartCategory, size: Size.Sm, tone: Tone.Primary);
+        }
+        Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden, role: UiRole.List, label: "Categories") {
+          foreach (var c in categories) {
+            Row(gap: 3, align: Align.Center, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: c.Name) {
+              Stack(gap: 0, grow: 1, minW: "0") {
+                Text(c.Name, fontWeight: FontWeight.Medium, color: c.Active ? Colors.OnSurface : Colors.TextMuted);
+                Text(c.Key + (c.AsksAboutInjury ? " · asks who was hurt" : "") + (c.Active ? "" : " · retired"), fontSize: FontSize.Caption, color: Colors.TextMuted);
+              }
+              Button(c.Active ? "Retire" : "Use again", onPress: () => Toggle(c), size: Size.Sm, tone: Tone.Ghost);
+            }
+          }
+        }
+      }
+      Stack(gap: 2) {
+        Row(gap: 2, align: Align.Center) {
+          Box(grow: 1) { SectionLabel("Severities"); }
+          Button("Add a severity", onPress: StartSeverity, size: Size.Sm, tone: Tone.Primary);
+        }
+        Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden, role: UiRole.List, label: "Severities") {
+          foreach (var s in severities) {
+            Row(gap: 3, align: Align.Center, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: s.Name) {
+              Stack(gap: 0, grow: 1, minW: "0") {
+                Text(s.Name, fontWeight: FontWeight.Medium);
+                Text("Rank " + s.Rank + (s.ReportWithinHours == null ? " · not reported by itself" : $" · report to {s.Authority} within {s.ReportWithinHours} hours"),
+                     fontSize: FontSize.Caption, color: Colors.TextMuted);
+              }
+            }
+          }
+        }
+      }
+    }
+    if (addingCategory) {
+      Dialog("Add a category", onDismiss: () => { addingCategory = false; }) {
+        Field("Key", value: key, hint: "Short and stable — code refers to it.");
+        Field("Name", value: name);
+        Checkbox("Ask who was hurt", value: asksAboutInjury);
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) { Button("Add it", onPress: SaveCategory, tone: Tone.Primary); }
+      }
+    }
+    if (addingSeverity) {
+      Dialog("Add a severity", onDismiss: () => { addingSeverity = false; }) {
+        Field("Key", value: key);
+        Field("Name", value: name);
+        NumberField("Rank", value: rank, min: 0, max: 100);
+        NumberField("Report to an authority within (hours)", value: hours, min: 0, hint: "0 when it is not reported by itself.");
+        Field("Reported to", value: authority);
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) { Button("Add it", onPress: SaveSeverity, tone: Tone.Primary); }
+      }
+    }
+  }
+}

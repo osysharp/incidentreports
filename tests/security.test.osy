@@ -1,0 +1,124 @@
+// Confidentiality, proved as each person: a report is read by its author and the director — nobody else, in lists,
+// counts and filters alike — and nobody, the director included, writes past the kit's functions.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.IncidentReports;
+
+[Test(Camp)]
+[runas(Ada)]
+void an_author_reads_her_own_reports_and_only_those() {
+  Assert.Equal(2, IncidentReport.Count());
+  Assert.Equal(0, IncidentReport.Count(r => r.Location == "Craft hut"));
+  Assert.Equal(2, MyIncidents().Count);
+  Assert.Equal("The jetty", MyIncidents()[0].Location);   // newest first
+}
+
+[Test(Camp)]
+[runas(Cleo)]
+void a_colleague_who_filed_nothing_reads_and_counts_nothing() {
+  Assert.Equal(0, IncidentReport.Count());
+  Assert.Equal(0, IncidentReport.Count(r => r.Category.Key == "injury"));
+  Assert.Equal(0, IncidentReport.Where(r => r.Description.Contains("knee")).ToList().Count);
+  Assert.Equal(0, IncidentPerson.Count());
+  Assert.Equal(0, MyIncidents().Count);
+}
+
+[Test(Camp)]
+[runas(Pia)]
+void a_parent_reads_no_report_not_even_about_her_own_son() {
+  Assert.Equal(0, IncidentReport.Count());
+  Assert.Equal(0, IncidentPerson.Count(p => p.Name == "Milo Varga"));
+}
+
+[Test(Camp)]
+void a_visitor_reads_nothing() {
+  Assert.Equal(0, IncidentReport.Count());
+  Assert.Equal(0, IncidentCategory.Count());
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void the_director_reads_every_report_with_its_internal_notes() {
+  Assert.Equal(3, IncidentReport.Count());
+  Assert.Equal("Check every buoyancy aid before the next session.", At("Canoe dock").ReviewNotes);
+  Assert.Equal(3, OpenIncidents().Count);
+}
+
+[Test(Camp)]
+[runas(Ada)]
+void the_author_sees_where_her_report_stands_but_never_the_internal_notes() {
+  var r = At("Canoe dock");
+  Assert.Equal(IncidentStatus.UnderReview, r.Status);
+  Assert.Equal("", r.ReviewNotes ?? "");
+  Assert.Equal(0, IncidentReport.Count(x => x.ReviewNotes.Contains("buoyancy")));
+}
+
+[Test(Camp)]
+[runas(Ben)]
+void a_witness_reads_his_own_line_and_never_the_report() {
+  Assert.Equal(1, IncidentPerson.Count());
+  var mine = IncidentPerson.Single(p => p.Person == Ben);
+  Assert.Equal(IncidentRole.Witness, mine.Role);
+  Assert.Equal(0, IncidentReport.Count(r => r.Location == "The jetty"));
+  Assert.Equal(0, IncidentPerson.Count(p => p.Name == "Milo Varga"));
+}
+
+[Test(Camp)]
+[runas(Ben)]
+void nobody_files_in_somebody_elses_name_or_past_the_function() {
+  Assert.Denied(() => { WriteReport(Ada); UnitOfWork.Commit(); });
+  Assert.Denied(() => { WriteReport(Ben); UnitOfWork.Commit(); });
+}
+
+[Test(Camp)]
+[runas(Pia)]
+void a_parent_cannot_file_a_report() {
+  Assert.Denied(() => ReportIncident(Cat("injury"), DateTime.UtcNow.AddHours(-1), "Car park", "Milo fell"));
+}
+
+[Test(Camp)]
+[runas(Ada)]
+void the_author_cannot_move_her_report_or_write_the_review() {
+  var r = At("The jetty");
+  Assert.Denied(() => { SetStatus(r, IncidentStatus.Closed); UnitOfWork.Commit(); });
+  Assert.Denied(() => { SetNotes(r, "All fine"); UnitOfWork.Commit(); });
+  Assert.Denied(() => StartIncidentReview(r));
+  Assert.Denied(() => ClassifyIncident(r, Sev("critical")));
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void even_the_director_moves_a_report_only_through_the_functions_and_never_rewrites_the_facts() {
+  var r = At("Craft hut");
+  Assert.Denied(() => { SetStatus(r, IncidentStatus.Closed); UnitOfWork.Commit(); });
+  Assert.Denied(() => { SetDescription(r, "Edited by the director"); UnitOfWork.Commit(); });
+  Assert.Denied(() => { r.Delete(); UnitOfWork.Commit(); });
+  Assert.Equal(3, IncidentReport.Count());
+}
+
+[Test(Camp)]
+[runas(Ada)]
+void nobody_deletes_a_report_not_even_its_author() {
+  Assert.Denied(() => { At("The jetty").Delete(); UnitOfWork.Commit(); });
+}
+
+[Test(Camp)]
+[runas(Ada)]
+void an_injury_changes_only_through_the_function() {
+  var p = Named("The jetty", "Milo Varga");
+  Assert.Denied(() => { SetInjury(p, "Nothing"); UnitOfWork.Commit(); });
+  UpdateIncidentPerson(p, IncidentRole.Injured, "Graze and bruise, left knee", IncidentTreatment.FirstAid, "Cleaned, plaster, ice pack");
+  Assert.Equal("Graze and bruise, left knee", Named("The jetty", "Milo Varga").Injury);
+}
+
+[Test(Camp)]
+[runas(Ada)]
+void the_policies_answer_as_the_camp_says() {
+  Assert.True(Security.Authorize(Dana, ReviewsIncidents));
+  Assert.False(Security.Authorize(Ada, ReviewsIncidents));
+  Assert.True(Security.Authorize(Cleo, ReportsIncidents));
+  Assert.False(Security.Authorize(Pia, ReportsIncidents));
+  Assert.True(Security.Authorize(Dana, ManagesIncidentSetup));
+  Assert.False(Security.Authorize(Ada, ManagesIncidentSetup));
+}

@@ -1,0 +1,125 @@
+// The review: taken up, classified, its cause and outcome written, reported to an authority by its deadline — watched on
+// a durable clock — closed once its actions are done, and re-opened when it was not.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Workflow;
+using Osysharp.IncidentReports;
+
+[Test(Camp)]
+[runas(Dana)]
+void a_report_goes_from_open_through_review_to_closed_and_back() {
+  var r = At("The jetty");
+  StartIncidentReview(r, "Spoke to Ada.");
+  Assert.Equal(IncidentStatus.UnderReview, At("The jetty").Status);
+  Assert.Equal(Dana.Id, At("The jetty").ReviewedBy!.Id);
+  RecordIncidentFindings(r, "Boards wet from the morning swim; no mat.", "A grip mat is now fixed to the jetty.");
+  CloseIncident(r);
+  var closed = At("The jetty");
+  Assert.Equal(IncidentStatus.Closed, closed.Status);
+  Assert.NotNull(closed.ClosedAt);
+  ReopenIncident(closed, "Milo's parents say the knee is swollen.");
+  var again = At("The jetty");
+  Assert.Equal(IncidentStatus.UnderReview, again.Status);
+  Assert.Null(again.ClosedAt);
+  Assert.Contains("Re-opened: Milo's parents say the knee is swollen.", again.ReviewNotes);
+  Assert.Equal(1, HeardCount("reviewstarted"));
+  Assert.Equal(1, HeardCount("closed"));
+  Assert.Equal(1, HeardCount("reopened"));
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void the_lifecycle_cannot_skip_review_or_close_twice() {
+  Assert.Equal("Start the review of INC-00001 before closing it.",
+               Assert.Throws<ValidationException>(() => CloseIncident(At("The jetty"))).Message);
+  var canoe = At("Canoe dock");
+  CloseIncident(canoe, "Buoyancy aids checked.");
+  Assert.Equal("INC-00002 is already closed.", Assert.Throws<ValidationException>(() => CloseIncident(At("Canoe dock"))).Message);
+  Assert.Throws<ValidationException>(() => StartIncidentReview(At("Canoe dock")));
+  Assert.Equal("Say why it is re-opened.", Assert.Throws<ValidationException>(() => ReopenIncident(At("Canoe dock"), "")).Message);
+}
+
+[Test(Camp)]
+[runas(Ada)]
+void the_reporter_reads_the_outcome_once_it_closes_and_never_the_cause() {
+  runas(Dana) {
+    var canoe = At("Canoe dock");
+    RecordIncidentFindings(canoe, "Campers were not told to stay seated.", "Every session now starts with the canoe rules.");
+    Assert.Equal("", OutcomeForReporter(At("Canoe dock")));
+    CloseIncident(At("Canoe dock"));
+  }
+  var mine = At("Canoe dock");
+  Assert.Equal("Every session now starts with the canoe rules.", OutcomeForReporter(mine));
+  Assert.Equal("", mine.RootCause ?? "");
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void a_severity_that_must_be_reported_sets_the_deadline_from_when_it_was_reported() {
+  var r = At("The jetty");
+  ClassifyIncident(r, Sev("moderate"));
+  Assert.False(At("The jetty").Reportable);
+  ClassifyIncident(r, Sev("major"));
+  var now = At("The jetty");
+  Assert.True(now.Reportable);
+  Assert.Equal("HSE (RIDDOR)", now.Authority);
+  Assert.Equal(new DateTime(2026, 7, 24, 10, 0, 0), now.AuthorityDueAt);
+  Assert.Equal(1, HeardCount("reportable"));
+  Assert.Equal(1, Heard.Count(h => h.Detail == "INC-00001:HSE (RIDDOR)"));
+  Assert.Equal(1, AwaitingAuthorityReport().Count);
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void the_app_is_warned_before_the_deadline_told_when_it_passes_and_never_twice() {
+  var r = At("The jetty");
+  MarkIncidentReportable(r, true, "Licensing authority", new DateTime(2026, 7, 16, 10, 0, 0));
+  Workflow.Settle(r);
+  TestClock.Set(new DateTime(2026, 7, 15, 9, 0, 0));
+  Workflow.Settle(r);
+  Assert.Equal(0, HeardCount("authoritydue"));
+  TestClock.Set(new DateTime(2026, 7, 15, 10, 30, 0));
+  Workflow.Settle(r);
+  Assert.Equal(1, HeardCount("authoritydue"));
+  TestClock.Set(new DateTime(2026, 7, 16, 10, 1, 0));
+  Workflow.Settle(r);
+  Assert.Equal(1, HeardCount("authorityoverdue"));
+  TestClock.Set(new DateTime(2026, 7, 17, 10, 0, 0));
+  Workflow.Settle(r);
+  Assert.Equal(1, HeardCount("authoritydue"));
+  Assert.Equal(1, HeardCount("authorityoverdue"));
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void a_report_made_to_the_authority_in_time_is_silent_and_may_then_close() {
+  var r = At("Canoe dock");
+  MarkIncidentReportable(r, true, "Licensing authority", new DateTime(2026, 7, 16, 10, 0, 0));
+  Workflow.Settle(r);
+  Assert.Equal("INC-00002 must be reported to Licensing authority before it closes.",
+               Assert.Throws<ValidationException>(() => CloseIncident(At("Canoe dock"))).Message);
+  Assert.Equal("Write the authority's reference for it.", Assert.Throws<ValidationException>(() => RecordAuthorityReport(At("Canoe dock"), " ")).Message);
+  RecordAuthorityReport(At("Canoe dock"), "LA-2026-0711");
+  TestClock.Set(new DateTime(2026, 7, 17, 10, 0, 0));
+  Workflow.Settle(r);
+  Assert.Equal(0, HeardCount("authoritydue"));
+  Assert.Equal(0, HeardCount("authorityoverdue"));
+  CloseIncident(At("Canoe dock"));
+  Assert.Equal(IncidentStatus.Closed, At("Canoe dock").Status);
+  Assert.Equal(0, AwaitingAuthorityReport().Count);
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void a_report_found_not_to_be_reportable_after_all_is_told_nothing() {
+  var r = At("The jetty");
+  MarkIncidentReportable(r, true, "Licensing authority", new DateTime(2026, 7, 16, 10, 0, 0));
+  Workflow.Settle(r);
+  MarkIncidentReportable(At("The jetty"), false);
+  TestClock.Set(new DateTime(2026, 7, 17, 10, 0, 0));
+  Workflow.Settle(r);
+  Assert.Equal(0, HeardCount("authorityoverdue"));
+  Assert.Equal("Say by when it must be reported.",
+               Assert.Throws<ValidationException>(() => MarkIncidentReportable(At("The jetty"), true, "HSE")).Message);
+}

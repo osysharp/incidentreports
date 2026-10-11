@@ -1,0 +1,83 @@
+// Corrective actions: set with an owner and a due date, read by their owner without the report, done with a note,
+// told once when overdue — and a report does not close while one is open.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Workflow;
+using Osysharp.IncidentReports;
+
+[Test(Camp)]
+[runas(Dana)]
+void an_action_is_set_its_owner_reads_it_without_the_report_and_marks_it_done() {
+  var a = AssignCorrectiveAction(At("Canoe dock"), "Check every buoyancy aid", Ben, new DateOnly(2026, 7, 16));
+  Assert.Equal(1, HeardCount("assigned"));
+  Assert.Equal(1, Heard.Count(h => h.Detail == "Check every buoyancy aid:Ben Strand"));
+  runas(Ben) {
+    var mine = MyCorrectiveActions();
+    Assert.Equal(1, mine.Count);
+    Assert.Equal("INC-00002 · Near miss", mine[0].About);
+    Assert.Equal(0, IncidentReport.Count(r => r.Location == "Canoe dock"));
+    Assert.Equal("Say what was done.", Assert.Throws<ValidationException>(() => CompleteCorrectiveAction(mine[0], "")).Message);
+    CompleteCorrectiveAction(mine[0], "All twenty checked; two replaced.");
+    Assert.Equal(0, MyCorrectiveActions().Count);
+  }
+  Assert.Equal(ActionStatus.Done, CorrectiveAction.Single(x => x.Id == a.Id).Status);
+  Assert.Equal(1, HeardCount("completed"));
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void a_report_does_not_close_while_an_action_is_open() {
+  AssignCorrectiveAction(At("Canoe dock"), "Teach the canoe rules first", Ada, new DateOnly(2026, 7, 20));
+  Assert.Equal("INC-00002 has actions still open: Teach the canoe rules first.",
+               Assert.Throws<ValidationException>(() => CloseIncident(At("Canoe dock"))).Message);
+  CancelCorrectiveAction(OpenActionsOn(At("Canoe dock"))[0], "Covered by the new induction instead.");
+  CloseIncident(At("Canoe dock"));
+  Assert.Equal(IncidentStatus.Closed, At("Canoe dock").Status);
+  Assert.Equal("INC-00002 is closed — re-open it to add an action.",
+               Assert.Throws<ValidationException>(() => AssignCorrectiveAction(At("Canoe dock"), "Late", Ada, new DateOnly(2026, 8, 1))).Message);
+}
+
+[Test(Camp)]
+[runas(Ada)]
+void somebody_who_does_not_own_an_action_cannot_do_it_or_set_one() {
+  CorrectiveAction? a = null;
+  runas(Dana) { a = AssignCorrectiveAction(At("Canoe dock"), "Replace the rope", Ben, new DateOnly(2026, 7, 16)); }
+  Assert.Equal(0, CorrectiveAction.Count());
+  Assert.Throws(() => CompleteCorrectiveAction(a!, "Done by Ada"));
+  Assert.Denied(() => AssignCorrectiveAction(At("The jetty"), "Mop", Ada, new DateOnly(2026, 7, 15)));
+  runas(Ben) { Assert.Denied(() => { SetDone(MyCorrectiveActions()[0]); UnitOfWork.Commit(); }); }
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void an_overdue_action_is_told_once_and_a_done_one_never() {
+  var late = AssignCorrectiveAction(At("Canoe dock"), "Check every buoyancy aid", Ben, new DateOnly(2026, 7, 15));
+  var done = AssignCorrectiveAction(At("Canoe dock"), "Put up the canoe rules", Ada, new DateOnly(2026, 7, 15));
+  Workflow.Settle(late);
+  Workflow.Settle(done);
+  runas(Ada) { CompleteCorrectiveAction(MyCorrectiveActions()[0], "Sign on the dock."); }
+  TestClock.Set(new DateTime(2026, 7, 16, 8, 0, 0));
+  Workflow.Settle(late);
+  Workflow.Settle(done);
+  Assert.Equal(1, HeardCount("actionoverdue"));
+  Assert.Equal(1, Heard.Count(h => h.Event == "actionoverdue" && h.Detail == "Check every buoyancy aid"));
+  TestClock.Set(new DateTime(2026, 7, 18, 8, 0, 0));
+  Workflow.Settle(late);
+  Assert.Equal(1, HeardCount("actionoverdue"));
+  Assert.Equal(["Check every buoyancy aid"], OverdueActions().Select(a => a.What).ToList());
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void a_moved_due_date_is_told_again_when_it_too_passes() {
+  var a = AssignCorrectiveAction(At("Canoe dock"), "Check every buoyancy aid", Ben, new DateOnly(2026, 7, 15));
+  Workflow.Settle(a);
+  TestClock.Set(new DateTime(2026, 7, 16, 8, 0, 0));
+  Workflow.Settle(a);
+  Assert.Equal(1, HeardCount("actionoverdue"));
+  ChangeCorrectiveAction(CorrectiveAction.Single(x => x.Id == a.Id), "Check every buoyancy aid", Ben, new DateOnly(2026, 7, 20));
+  TestClock.Set(new DateTime(2026, 7, 21, 8, 0, 0));
+  Workflow.Settle(a);
+  Assert.Equal(2, HeardCount("actionoverdue"));
+}

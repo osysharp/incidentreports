@@ -1,0 +1,151 @@
+// The kit's pages, driven as each person drives them. `osy test --pixels` photographs each (Ui.Shot) — the README's
+// screenshots are these.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.IncidentReports;
+
+[Test(Camp)]
+[runas(Cleo)]
+void a_cook_reports_a_burn_with_who_was_hurt_and_a_photo() {
+  Ui.Viewport(1280, 1000);
+  Ui.SignInAs(Cleo);
+  Ui.Visit("/incidents");
+  Ui.Click("Report an incident");
+  Assert.Dialog("Report an incident");
+  Ui.Select("What kind", Cat("injury"));
+  Ui.Fill("Where", "Camp kitchen, by the oven");
+  Ui.Fill("What happened", "Reached past the oven door and touched the hot rack.");
+  Ui.Fill("What was done there and then", "Cold water for twenty minutes.");
+  Ui.Fill("Their name", "Cleo Marsh");
+  Ui.Fill("The injury", "Small burn, back of the right hand");
+  Ui.Fill("A witness", "Ada Okafor");
+  Ui.Upload("Add a photo", "hand.jpg", "a photo of the burn");
+  Assert.Visible("hand.jpg");
+  Ui.Shot("incidents-report");
+  Ui.Click("File the report");
+  Assert.Visible("INC-00004 is filed. The people who review incidents can read it now.");
+  Assert.Visible("INC-00004 · Injury", within: "Your reports");
+  Ui.Click("Open", within: "INC-00004");
+  Assert.Visible("Small burn, back of the right hand", within: "Cleo Marsh");
+  Assert.Visible("hand.jpg");
+}
+
+[Test(Camp)]
+[runas(Pia)]
+void a_parent_reads_what_happened_to_her_son_and_acknowledges_it() {
+  runas(Dana) { InformAboutIncident(Named("The jetty", "Milo Varga"), Pia, "He was fine and went back to canoeing."); }
+  Ui.Viewport(1280, 900);
+  Ui.SignInAs(Pia);
+  Ui.Visit("/incidents");
+  Assert.Hidden("Report an incident");
+  Assert.Visible("INC-00001 — Injury", within: "Told to you");
+  Ui.Click("Read and acknowledge");
+  Assert.Visible("Injury: Graze, left knee", within: "The notice");
+  Ui.Fill("Anything you want to say back", "Thank you for telling us.");
+  Ui.Shot("incidents-told");
+  Ui.Click("Acknowledge");
+  Assert.Visible("Thank you — it is acknowledged.");
+}
+
+[Test(Camp)]
+[runas(Ben)]
+void a_witness_writes_his_statement_and_an_owner_marks_an_action_done() {
+  runas(Dana) { AssignCorrectiveAction(At("Canoe dock"), "Check every buoyancy aid", Ben, new DateOnly(2026, 7, 16)); }
+  Ui.Viewport(1280, 1000);
+  Ui.SignInAs(Ben);
+  Ui.Visit("/incidents");
+  Assert.Visible("Check every buoyancy aid", within: "Your actions");
+  Ui.Shot("incidents-mine");
+  Ui.Click("Write your statement");
+  Ui.Fill("Statement", "Milo ran onto the jetty and slipped by the ladder.");
+  Ui.Click("Keep my statement");
+  Assert.Visible("Your statement is kept.");
+  Ui.Click("Mark done", within: "Check every buoyancy aid");
+  Ui.Fill("What was done", "All twenty checked; two replaced.");
+  Ui.Click("Mark it done");
+  Assert.Visible("“Check every buoyancy aid” is done.");
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void the_director_reviews_a_report_sets_an_action_and_tells_the_parent() {
+  Ui.Viewport(1440, 1000);
+  Ui.SignInAs(Dana);
+  Ui.Visit("/staff/incidents");
+  Ui.Shot("incidents-desk");
+  Assert.Visible("INC-00001 · Injury", within: "Waiting for review");
+  Assert.Visible("INC-00002 · Near miss", within: "Under review");
+  Ui.Click("Open", within: "INC-00001");
+  Assert.Dialog("INC-00001 · Injury");
+  Ui.Click("Start the review");
+  Assert.Visible("The review has started.");
+  Ui.Select("Severity", Sev("moderate"));
+  Ui.Click("Classify");
+  Assert.Visible("Classified as Moderate.");
+  Ui.Click("Tell Pia Varga");
+  Assert.Visible("Pia Varga is told about Milo Varga.");
+  Ui.Fill("What caused it", "Wet boards and no grip mat.");
+  Ui.Click("Keep the findings");
+  Ui.Click("Add an action");
+  Ui.Fill("What is to be done", "Fix a grip mat to the jetty");
+  Ui.Select("Who does it", Ben);
+  Ui.Fill("Due", "2026-07-18");
+  Ui.Click("Set the action");
+  Assert.Visible("The action is set.");
+  Assert.Visible("Fix a grip mat to the jetty", within: "Corrective actions");
+  Ui.Shot("incidents-review");
+  Ui.Click("Close the report");
+  Assert.Visible("INC-00001 has actions still open: Fix a grip mat to the jetty.");
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void the_register_lists_the_month_and_exports_it() {
+  runas(Dana) { ClassifyIncident(At("The jetty"), Sev("major")); }
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Dana);
+  Ui.Visit("/staff/incidents/register");
+  Ui.Fill("From", "2026-07-01");
+  Ui.Fill("To", "2026-07-31");
+  Ui.Click("Show");
+  Assert.Visible("INC-00001");
+  Assert.Visible("Milo Varga (first aid on site)");
+  Ui.Click("Export as CSV");
+  Assert.Visible("Download the register");
+  Ui.Shot("incidents-register");
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void the_director_adds_a_category() {
+  Ui.Viewport(1280, 900);
+  Ui.SignInAs(Dana);
+  Ui.Visit("/staff/incidents/setup");
+  Assert.Visible("report to HSE (RIDDOR) within 240 hours", within: "Major");
+  Ui.Click("Add a category");
+  Ui.Fill("Key", "illness");
+  Ui.Fill("Name", "Illness");
+  Ui.Check("Ask who was hurt");
+  Ui.Click("Add it");
+  Assert.Visible("Illness is added.");
+  Assert.Visible("illness · asks who was hurt", within: "Illness");
+  Ui.Shot("incidents-setup");
+}
+
+[Test(Camp)]
+[runas(Ada)]
+void the_pages_fit_a_phone_and_read_in_the_dark() {
+  Ui.SignInAs(Ada);
+  Ui.Viewport(390, 844);
+  Ui.Visit("/incidents");
+  Assert.Visible("INC-00001 · Injury", within: "Your reports");
+  Assert.NoOverflow();
+  Ui.Shot("incidents-mine-phone");
+  Ui.Viewport(1440, 1000);
+  Ui.Theme("dark");
+  Ui.SignInAs(Dana);
+  Ui.Visit("/staff/incidents");
+  Assert.Visible("Waiting for review");
+  Ui.Shot("incidents-desk-dark");
+}

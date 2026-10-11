@@ -1,0 +1,190 @@
+// What the pages read: one report as a card, with its people, files, actions and notices as the caller may see them.
+
+namespace Osysharp.IncidentReports;
+
+using Osysharp.Identity;
+using Osysharp.Storage;
+
+/// One person in a report, as a page shows them.
+public class IncidentPersonLine {
+  public Guid Id;
+  public string Name = "";
+  public string Role = "";
+  public bool Hurt;
+  public string Injury = "";
+  public string Care = "";
+  public string Statement = "";
+  /// The people who must be told about them and have not been — names, for the desk's "Tell" buttons.
+  public List<IncidentContactLine> ToTell = [];
+  /// Who has been told, and whether they acknowledged it — "Pia Varga · acknowledged 14 Jul".
+  public List<string> Told = [];
+}
+
+/// A file behind a report, as a page links it.
+public class IncidentFileLine {
+  public Guid File;
+  public string Name = "";
+}
+
+public class IncidentContactLine {
+  public Guid Id;
+  public string Name = "";
+}
+
+/// One corrective action, as a page shows it.
+public class IncidentActionLine {
+  public Guid Id;
+  public string What = "";
+  public string Owner = "";
+  public string Due = "";
+  public string Status = "";
+  public bool Open;
+  public bool Overdue;
+  public string Note = "";
+  public string About = "";
+}
+
+/// One report, as a page shows it — to its author, or (`Review` true) to a reviewer, with the review's own parts.
+public class IncidentCard {
+  public Guid Id;
+  public string Number = "";
+  public string Category = "";
+  public bool AsksAboutInjury;
+  public IncidentStatus Status = IncidentStatus.Open;
+  public string Severity = "";
+  public string When = "";
+  public string Where = "";
+  public string Description = "";
+  public string ImmediateAction = "";
+  public string ReportedBy = "";
+  public string Outcome = "";
+  public bool CanAdd;
+  public bool Review;
+  public string RootCause = "";
+  public string ReviewNotes = "";
+  /// "Due to HSE (RIDDOR) by 24 Jul 10:00", "Reported to HSE (RIDDOR) on 20 Jul · ref 1234", or "".
+  public string AuthorityLine = "";
+  public bool AuthorityOverdue;
+  public bool AwaitingAuthority;
+  public List<IncidentPersonLine> People = [];
+  public List<IncidentFileLine> Files = [];
+  public List<IncidentActionLine> Actions = [];
+}
+
+/// "14 Jul 2026, 09:40".
+public string IncidentWhen(DateTime at) { return at.ToString("d MMM yyyy, HH:mm"); }
+
+/// A corrective action as a line.
+public IncidentActionLine ActionLineOf(CorrectiveAction a) {
+  var today = DateOnly.FromDateTime(DateTime.UtcNow);
+  return new IncidentActionLine { Id = a.Id, What = a.What, Owner = a.Owner == null ? "" : a.Owner.DisplayName ?? "",
+                                  Due = a.DueOn.ToString("d MMM yyyy"), Status = a.Status.Label, Open = a.Status == ActionStatus.Open,
+                                  Overdue = a.Status == ActionStatus.Open && a.DueOn < today, Note = a.DoneNote, About = a.About };
+}
+
+/// `report` as a card for the caller: its author's view, or a reviewer's with the review, the actions and who to tell.
+public IncidentCard IncidentCardOf(Guid id) {
+  var r = IncidentReport.Include(x => x.Category).Include(x => x.Severity).Include(x => x.Reporter).Single(x => x.Id == id);
+  var review = ReviewsIncidents;
+  var card = new IncidentCard {
+    Id = r.Id, Number = r.Number, Category = r.Category.Name, AsksAboutInjury = r.Category.AsksAboutInjury, Status = r.Status,
+    Severity = r.Severity == null ? "" : r.Severity!.Name, When = IncidentWhen(r.OccurredAt), Where = r.Location,
+    Description = r.Description, ImmediateAction = r.ImmediateAction, ReportedBy = r.Reporter.DisplayName ?? "",
+    Outcome = review ? r.Outcome : OutcomeForReporter(r), CanAdd = MayAddTo(r), Review = review,
+    RootCause = review ? r.RootCause : "", ReviewNotes = review ? r.ReviewNotes : "",
+    AwaitingAuthority = r.Reportable && r.ReportedToAuthorityAt == null,
+    AuthorityOverdue = r.Reportable && r.ReportedToAuthorityAt == null && r.AuthorityDueAt != null && r.AuthorityDueAt < DateTime.UtcNow,
+  };
+  var to = r.Authority == "" ? "the authority" : r.Authority;
+  if (r.Reportable) {
+    card.AuthorityLine = r.ReportedToAuthorityAt != null
+      ? "Reported to " + to + " on " + r.ReportedToAuthorityAt!.Value.ToString("d MMM yyyy") + " · ref " + r.AuthorityReference
+      : "Due to " + to + " by " + r.AuthorityDueAt!.Value.ToString("d MMM yyyy, HH:mm");
+  }
+  var notices = review ? NoticesOn(r) : [];
+  foreach (var p in PeopleIn(r)) {
+    var line = new IncidentPersonLine { Id = p.Id, Name = p.Name, Role = p.Role.Label, Hurt = p.Role == IncidentRole.Injured,
+                                        Injury = p.Injury, Statement = p.Statement,
+                                        Care = p.Role == IncidentRole.Injured ? p.Treatment.Label + (p.TreatmentNote != "" ? " — " + p.TreatmentNote : "") : "" };
+    if (review) {
+      foreach (var n in notices.Where(n => n.About.Id == p.Id).ToList()) {
+        line.Told.Add((n.Recipient.DisplayName ?? "") + (n.AcknowledgedAt == null ? " · told " + n.SentAt.ToString("d MMM") : " · acknowledged " + n.AcknowledgedAt!.Value.ToString("d MMM")));
+      }
+      foreach (var c in ContactsToInform(p)) {
+        if (!notices.Any(n => n.About.Id == p.Id && n.Recipient.Id == c.Id)) { line.ToTell.Add(new IncidentContactLine { Id = c.Id, Name = c.DisplayName ?? "" }); }
+      }
+    }
+    card.People.Add(line);
+  }
+  card.Files = FilesOf(r).Select(f => new IncidentFileLine { File = f.File.Id, Name = f.Name }).ToList();
+  if (review) { card.Actions = ActionsOn(r).Select(a => ActionLineOf(a)).ToList(); }
+  return card;
+}
+
+/// One report in a list.
+public class IncidentRow {
+  public Guid Id;
+  public string Number = "";
+  public string Title = "";
+  public string Detail = "";
+  public string Status = "";
+  public IncidentStatus State;
+  public string Severity = "";
+  public int Rank;
+  public bool Flag;
+}
+
+/// A report as a line in a list — "INC-00001 · Injury", "14 Jul 2026, 09:40 · The jetty · Ada Okafor".
+public IncidentRow IncidentRowOf(IncidentReport r) {
+  return new IncidentRow { Id = r.Id, Number = r.Number, Title = r.Number + " · " + r.Category.Name,
+                           Detail = IncidentWhen(r.OccurredAt) + " · " + r.Location + (r.Reporter == null ? "" : " · " + (r.Reporter.DisplayName ?? "")),
+                           Status = r.Status.Label, State = r.Status, Severity = r.Severity == null ? "" : r.Severity!.Name,
+                           Rank = r.Severity == null ? 0 : r.Severity!.Rank,
+                           Flag = r.Reportable && r.ReportedToAuthorityAt == null };
+}
+
+/// The desk's lists.
+public class IncidentDeskView {
+  public IncidentFigures Figures = new IncidentFigures();
+  public List<IncidentRow> Open = [];
+  public List<IncidentRow> UnderReview = [];
+  public List<IncidentRow> ToAuthority = [];
+  public List<IncidentActionLine> OverdueActions = [];
+}
+
+/// What the desk shows. Reviewers only.
+[Authorize(ReviewsIncidents)]
+public IncidentDeskView IncidentDeskNow() {
+  var open = IncidentReport.Include(r => r.Category).Include(r => r.Severity).Include(r => r.Reporter)
+    .Where(r => r.Status != IncidentStatus.Closed).OrderBy(r => r.ReportedAt).Take(200).ToList();
+  return new IncidentDeskView {
+    Figures = IncidentFiguresNow(),
+    Open = open.Where(r => r.Status == IncidentStatus.Open).Select(r => IncidentRowOf(r)).ToList(),
+    UnderReview = open.Where(r => r.Status == IncidentStatus.UnderReview).Select(r => IncidentRowOf(r)).ToList(),
+    ToAuthority = IncidentReport.Include(r => r.Category).Include(r => r.Severity).Include(r => r.Reporter)
+      .Where(r => r.Reportable && r.ReportedToAuthorityAt == null).OrderBy(r => r.AuthorityDueAt).Take(100).ToList()
+      .Select(r => IncidentRowOf(r)).ToList(),
+    OverdueActions = OverdueActions().Select(a => ActionLineOf(a)).ToList(),
+  };
+}
+
+/// The signed-in person's side: their reports, their actions, what they were told, and statements asked of them.
+public class MyIncidentsView {
+  public bool Reports;
+  public List<IncidentRow> Filed = [];
+  public List<IncidentActionLine> Actions = [];
+  public List<IncidentNotice> Notices = [];
+  /// Lines in which they are a witness or involved — theirs to write a statement for, while they have none.
+  public List<IncidentPerson> Statements = [];
+}
+
+public MyIncidentsView MyIncidentsNow() {
+  var me = CurrentPrincipal();
+  return new MyIncidentsView {
+    Reports = ReportsIncidents,
+    Filed = MyIncidents().Select(r => IncidentRowOf(r)).ToList(),
+    Actions = MyCorrectiveActions().Select(a => ActionLineOf(a)).ToList(),
+    Notices = MyIncidentNotices(),
+    Statements = IncidentPerson.Where(p => p.Person == me && p.Role != IncidentRole.Injured && p.Statement == "").Take(50).ToList(),
+  };
+}

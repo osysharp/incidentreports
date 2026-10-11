@@ -1,0 +1,31 @@
+// Osysharp.IncidentReports — confidential incident reports: an injury, a near miss, damage, a safeguarding concern.
+// Who was hurt and who saw it, the photos, what was done there and then; a review that classifies it, finds the cause
+// and sets corrective actions with owners and due dates; the people who must be told (a child's guardians) told, and
+// their acknowledgement kept; the deadline for reporting it to an authority watched; a register and its export.
+//
+// ⚑ CONFIDENTIAL BY DECLARATION. A report is read by the person who filed it and by whoever the app says reviews
+//   incidents — nobody else, in lists, counts and searches alike. An action's owner reads their action, a person told
+//   about an incident reads what they were told, a witness reads their own statement: never the report itself.
+// ⚑ THE APP SAYS WHO: `policy ReviewsIncidents => IsSafetyLead;` (reads every report, reviews, assigns actions, tells
+//   people, keeps the register), `policy ReportsIncidents => IsStaff;` (who may file one — anybody signed in, until the
+//   app narrows it), and `policy ManagesIncidentSetup => IsAdmin;` (the categories and severities).
+// ⚑ NOTHING IS DELETED. A report is corrected by its author while it is open and moves on only through the review; a
+//   closed one can be re-opened, never removed.
+package Osysharp.IncidentReports {
+  version     "0.1.0";
+  minPlatform "0.9.0";
+  summary     "confidential incident reports — injuries, near misses, damage, concerns — in categories and severities the app defines, with the people involved and witnesses (accounts or just names), their statements, injuries and treatment, photos and files, a review that classifies the report, records the cause and sets corrective actions with owners and due dates, a close that waits for those actions, notices to the people who must be told (a child's guardians) with their acknowledgement, a deadline for reporting to an authority watched on a durable clock, a register with a CSV export — and a reporter's page, a review desk, the register and a setup page.";
+  pairsWith   "Osysharp.Guardianship: a child's guardians are told about an incident involving the child (Osysharp.IncidentReports.Guardianship arrives by itself)";
+  model "model/**/*.osy";
+  // The personal data its own fields hold: what a person wrote about what happened and their statement (Content), who
+  // else was there by name (Identity), and the injury and the treatment given (Special — health data).
+  personal Content;
+  personal Identity;
+  personal Special;
+  use Osysharp.Identity@0;   // `Principal`: who reported, who was involved, who owns an action
+  use Osysharp.Storage;      // photos and files behind a report
+  use Osysharp.Csv@0;        // the register's export
+  use Osysharp.Ui;           // the pages
+  use Osysharp.Workflow;     // the authority's deadline and an action falling overdue, on a durable clock
+  tests "tests";
+}

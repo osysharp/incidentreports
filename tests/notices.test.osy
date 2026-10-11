@@ -1,0 +1,64 @@
+// Telling a camper's parents: the camp answers who must be told (`IIncidentContacts`), the director tells them, they
+// read what they were told — never the report — and acknowledge it.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.IncidentReports;
+
+[Test(Camp)]
+[runas(Dana)]
+void the_camps_contacts_are_who_must_be_told_about_a_camper() {
+  var milo = Named("The jetty", "Milo Varga");
+  Assert.Equal(["Pia Varga"], ContactsToInform(milo).Select(p => p.DisplayName).ToList());
+  Assert.Equal(0, ContactsToInform(Named("The jetty", "Ben Strand")).Count);
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void a_parent_is_told_reads_what_she_was_told_and_acknowledges_it() {
+  var sent = InformContacts(Named("The jetty", "Milo Varga"), "He was fine and went back to the activity.");
+  Assert.Equal(1, sent.Count);
+  Assert.Equal(1, HeardCount("notice"));
+  Assert.Equal(1, Heard.Count(h => h.Detail == "Pia Varga:Milo Varga"));
+  Assert.Equal(0, InformContacts(Named("The jetty", "Milo Varga")).Count);   // everybody told already
+  runas(Pia) {
+    var mine = MyIncidentNotices();
+    Assert.Equal(1, mine.Count);
+    Assert.Contains("INC-00001 — Injury", mine[0].Summary);
+    Assert.Contains("Injury: Graze, left knee", mine[0].Summary);
+    Assert.Contains("Care given: First aid on site — Cleaned, plaster.", mine[0].Summary);
+    Assert.Contains("He was fine and went back to the activity.", mine[0].Summary);
+    Assert.Equal(0, IncidentReport.Count());
+    AcknowledgeIncidentNotice(mine[0], "Thank you — he told us all about it.");
+    AcknowledgeIncidentNotice(MyIncidentNotices()[0]);
+    Assert.Equal("Thank you — he told us all about it.", MyIncidentNotices()[0].Response);
+  }
+  Assert.NotNull(NoticesOn(At("The jetty"))[0].AcknowledgedAt);
+  Assert.Equal(1, HeardCount("acknowledged"));
+}
+
+[Test(Camp)]
+[runas(Rob)]
+void another_parent_reads_no_notice_and_cannot_acknowledge_one() {
+  IncidentNotice? n = null;
+  runas(Dana) { n = InformAboutIncident(Named("The jetty", "Milo Varga"), Pia); }
+  Assert.Equal(0, IncidentNotice.Count());
+  Assert.Equal(0, MyIncidentNotices().Count);
+  Assert.Throws(() => AcknowledgeIncidentNotice(n!));
+}
+
+[Test(Camp)]
+[runas(Ada)]
+void only_a_reviewer_tells_anybody() {
+  Assert.Denied(() => InformAboutIncident(Named("The jetty", "Milo Varga"), Pia));
+}
+
+[Test(Camp)]
+[runas(Dana)]
+void the_same_person_is_not_told_twice_and_a_person_told_stays_in_the_report() {
+  var milo = Named("The jetty", "Milo Varga");
+  InformAboutIncident(milo, Pia);
+  Assert.Equal("Pia Varga has already been told about Milo Varga.", Assert.Throws<ValidationException>(() => InformAboutIncident(milo, Pia)).Message);
+  Assert.Equal("Somebody has been told about Milo Varga, so the record stays.",
+               Assert.Throws<ValidationException>(() => RemoveIncidentPerson(Named("The jetty", "Milo Varga"))).Message);
+}

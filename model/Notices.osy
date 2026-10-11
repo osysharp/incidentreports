@@ -1,0 +1,122 @@
+// Telling the people who must be told — a child's parents, an employee's next of kin, a client's carer — what happened
+// to somebody named in a report, and keeping their acknowledgement. They read what they were told, never the report.
+
+namespace Osysharp.IncidentReports;
+
+using Osysharp.Identity;
+
+/// THE SEAM — who must be told when `person` is named in an incident. The app's classes are found, never wired: a
+/// guardianship kit's bridge answers "their guardians", an app may answer "their next of kin". Every implementation is
+/// asked, as the reviewer, and the answers are merged.
+public interface IIncidentContacts {
+  List<Principal> ContactsFor(Principal person);
+}
+
+/// One notice: what somebody named in a report was told about, who was told, when, and when they acknowledged it.
+/// Read by the person told and by reviewers; written only by the kit's functions.
+public entity IncidentNotice {
+  [Required, Immutable] IncidentReport Report;
+  [Required, Immutable] IncidentPerson About;
+  [Required, Immutable] Principal Recipient;
+  /// What they were told, as it was told — kept exactly. The report's number, when and where, the part the person had,
+  /// the injury and the care given, and the reviewer's own words.
+  [Required, Immutable, MaxLength(6000), Classification(Personal.Special)] string Summary;
+  [Immutable] Principal? SentBy;
+  [Immutable] DateTime SentAt = DateTime.UtcNow;
+  DateTime? AcknowledgedAt;
+  /// What they said back, if anything.
+  [MaxLength(2000), Classification(Personal.Content)] string Response = "";
+
+  security {
+    allow read when IsAuthenticated where Recipient == user;
+    allow read when ReviewsIncidents;
+    allow create, update when IsAuthenticated;
+    deny create except via InformAboutIncident;
+    deny update AcknowledgedAt, Response except via AcknowledgeIncidentNotice;
+    allow delete when ReviewsIncidents;
+    deny delete except via EraseIncidentDataOf;
+  }
+}
+
+/// Somebody was told about an incident — the moment to send them the mail or the message that says so.
+[Event("Incident notice sent")]
+public sealed class IncidentNoticeSent { public IncidentNotice Notice; }
+
+/// Somebody told about an incident acknowledged it.
+[Event("Incident notice acknowledged")]
+public sealed class IncidentNoticeAcknowledged { public IncidentNotice Notice; }
+
+/// The people who must be told about `p` — every `IIncidentContacts` the app has, asked as the caller, merged; nobody
+/// when `p` has no account or nothing in the app answers.
+[Authorize(ReviewsIncidents)]
+public List<Principal> ContactsToInform(IncidentPerson p) {
+  List<Principal> found = [];
+  if (p.Person == null) { return found; }
+  foreach (var source in App.Implementations<IIncidentContacts>()) {
+    foreach (var c in source.ContactsFor(p.Person!)) {
+      if (!found.Any(f => f.Id == c.Id)) { found.Add(c); }
+    }
+  }
+  return found;
+}
+
+/// What a notice about `p` says — the facts of their part, and the reviewer's own words when given.
+public string NoticeSummary(IncidentPerson p, string message) {
+  var r = p.Report;
+  var lines = new List<string>();
+  lines.Add(r.Number + " — " + r.Category.Name + ", " + r.OccurredAt.ToString("d MMMM yyyy HH:mm") + " UTC, at " + r.Location + ".");
+  lines.Add(p.Name + ": " + p.Role.Label.ToLower() + ".");
+  if (p.Injury != "") { lines.Add("Injury: " + p.Injury); }
+  if (p.Role == IncidentRole.Injured) { lines.Add("Care given: " + p.Treatment.Label + (p.TreatmentNote != "" ? " — " + p.TreatmentNote : "") + "."); }
+  if (message.Trim() != "") { lines.Add(""); lines.Add(message.Trim()); }
+  return string.Join("\n", lines);
+}
+
+/// Tell `recipient` about what happened to `about`, in a summary the kit writes (plus `message`, the reviewer's own
+/// words). Telling the same person twice about the same person in a report is refused. Reviewers only.
+[Server, Authorize(ReviewsIncidents)]
+public IncidentNotice InformAboutIncident(IncidentPerson about, Principal recipient, string message = "") {
+  if (IncidentNotice.Any(n => n.About == about && n.Recipient == recipient)) {
+    throw new ValidationException((recipient.DisplayName ?? "They") + " has already been told about " + about.Name + ".");
+  }
+  var n = new IncidentNotice { Report = about.Report, About = about, Recipient = recipient, Summary = NoticeSummary(about, message),
+                               SentBy = CurrentPrincipal() };
+  Raise(new IncidentNoticeSent { Notice = n });
+  UnitOfWork.Commit();
+  return n;
+}
+
+/// Tell everybody who must be told about `about` and has not been — the people `ContactsToInform` finds. Answers the
+/// notices sent (none when everybody has been told).
+[Server, Authorize(ReviewsIncidents)]
+public List<IncidentNotice> InformContacts(IncidentPerson about, string message = "") {
+  List<IncidentNotice> sent = [];
+  foreach (var c in ContactsToInform(about)) {
+    if (IncidentNotice.Any(n => n.About == about && n.Recipient == c)) { continue; }
+    sent.Add(InformAboutIncident(about, c, message));
+  }
+  return sent;
+}
+
+/// Acknowledge a notice — the person told, with what they say back. Acknowledging again changes nothing.
+[Server, Authorize(IsAuthenticated)]
+public void AcknowledgeIncidentNotice(IncidentNotice notice, string response = "") {
+  if (notice.Recipient != CurrentPrincipal()) { throw new NotAuthorized("Only the person told can acknowledge it."); }
+  if (notice.AcknowledgedAt != null) { return; }
+  notice.AcknowledgedAt = DateTime.UtcNow;
+  notice.Response = response.Trim();
+  Raise(new IncidentNoticeAcknowledged { Notice = notice });
+  UnitOfWork.Commit();
+}
+
+/// The notices sent to the caller, the ones still to acknowledge first.
+public List<IncidentNotice> MyIncidentNotices() {
+  var me = CurrentPrincipal();
+  return IncidentNotice.Where(n => n.Recipient == me).OrderBy(n => n.AcknowledgedAt != null).ThenByDescending(n => n.SentAt).Take(100).ToList();
+}
+
+/// The notices sent about anybody in `report`. Reviewers only.
+[Authorize(ReviewsIncidents)]
+public List<IncidentNotice> NoticesOn(IncidentReport report) {
+  return IncidentNotice.Include(n => n.Recipient).Include(n => n.About).Where(n => n.Report == report).OrderBy(n => n.SentAt).Take(100).ToList();
+}

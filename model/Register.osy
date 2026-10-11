@@ -1,0 +1,123 @@
+// The register — every report in a period, one line each, the way an injury log or an accident book reads — its CSV
+// export, the figures the desk shows, and forgetting a person when a privacy request asks.
+
+namespace Osysharp.IncidentReports;
+
+using Osysharp.Identity;
+using Osysharp.Csv;
+using Osysharp.Storage;
+
+/// One line of the register.
+public class IncidentRegisterRow {
+  public Guid Id;
+  public string Number = "";
+  public DateTime OccurredAt;
+  public DateTime ReportedAt;
+  public string Category = "";
+  public string Severity = "";
+  public int SeverityRank;
+  public string Location = "";
+  public string Description = "";
+  /// The people hurt, "Name (treatment)", joined.
+  public string Hurt = "";
+  public int DaysAway;
+  public string Status = "";
+  public string Authority = "";
+  public string ReportedBy = "";
+  public int OpenActions;
+}
+
+/// Every report that happened between `from` and `to` (inclusive days, UTC), oldest first — what an inspector, an
+/// insurer or a board asks for. Reviewers only.
+[Authorize(ReviewsIncidents)]
+[SuppressWarning("cost-unbounded-read")]   // a register is every report of its period, however many there are
+public List<IncidentRegisterRow> IncidentRegister(DateOnly from, DateOnly to) {
+  var start = from.ToDateTime(new TimeOnly(0, 0));
+  var end = to.AddDays(1).ToDateTime(new TimeOnly(0, 0));
+  var reports = IncidentReport.Include(r => r.Category).Include(r => r.Severity).Include(r => r.Reporter)
+    .Where(r => r.OccurredAt >= start && r.OccurredAt < end).OrderBy(r => r.OccurredAt).ToList();
+  var ids = reports.Select(r => r.Id).ToList();
+  var people = ids.Count == 0 ? [] : IncidentPerson.Where(p => ids.Contains(p.Report.Id) && p.Role == IncidentRole.Injured).ToList();
+  var actions = ids.Count == 0 ? [] : CorrectiveAction.Where(a => ids.Contains(a.Report.Id) && a.Status == ActionStatus.Open).ToList();
+  List<IncidentRegisterRow> rows = [];
+  foreach (var r in reports) {
+    var hurt = people.Where(p => p.Report.Id == r.Id).ToList();
+    rows.Add(new IncidentRegisterRow {
+      Id = r.Id, Number = r.Number, OccurredAt = r.OccurredAt, ReportedAt = r.ReportedAt, Category = r.Category.Name,
+      Severity = r.Severity == null ? "" : r.Severity!.Name, SeverityRank = r.Severity == null ? 0 : r.Severity!.Rank,
+      Location = r.Location, Description = r.Description,
+      Hurt = string.Join("; ", hurt.Select(p => p.Name + " (" + p.Treatment.Label.ToLower() + ")")),
+      DaysAway = hurt.Sum(p => p.DaysAway), Status = r.Status.Label,
+      Authority = !r.Reportable ? "" : r.ReportedToAuthorityAt != null ? "Reported " + r.ReportedToAuthorityAt!.Value.ToString("yyyy-MM-dd") + " · " + r.AuthorityReference
+                : "Due " + r.AuthorityDueAt!.Value.ToString("yyyy-MM-dd HH:mm"),
+      ReportedBy = r.Reporter.DisplayName ?? "", OpenActions = actions.Count(a => a.Report.Id == r.Id),
+    });
+  }
+  return rows;
+}
+
+/// The register between `from` and `to` as CSV, one line per report.
+[Authorize(ReviewsIncidents)]
+public string IncidentRegisterCsv(DateOnly from, DateOnly to) {
+  var org = App.Setting<IncidentsSetup>().Organisation;
+  List<List<string>> rows = [];
+  foreach (var r in IncidentRegister(from, to)) {
+    rows.Add([r.Number, r.OccurredAt.ToString("yyyy-MM-dd HH:mm"), r.ReportedAt.ToString("yyyy-MM-dd HH:mm"), r.Category, r.Severity,
+              r.Location, r.Description, r.Hurt, r.DaysAway.ToString(), r.Status, r.Authority, r.ReportedBy, r.OpenActions.ToString(), org]);
+  }
+  return WriteCsv(["number", "occurred", "reported", "category", "severity", "location", "what_happened", "hurt", "days_away",
+                   "status", "authority", "reported_by", "open_actions", "organisation"], rows);
+}
+
+/// `IncidentRegisterCsv(from, to)` as a file, and a short-lived signed link to download it — for the desk.
+[Authorize(ReviewsIncidents)]
+public string IncidentRegisterFileLink(DateOnly from, DateOnly to) {
+  var path = $"incidents/register-{from.ToString("yyyyMMdd")}-{to.ToString("yyyyMMdd")}-{DateTime.UtcNow.ToString("yyyyMMddHHmmss")}.csv";
+  File.WriteAllBytes(path, Text.ToBytes(IncidentRegisterCsv(from, to)));
+  return File.SignedUrl(path);
+}
+
+/// The desk's figures.
+public class IncidentFigures {
+  public int Open;
+  public int UnderReview;
+  public int AwaitingAuthority;
+  public int OverdueActions;
+  /// Reports in the last 90 days, by category: "Slip or trip: 4".
+  public List<string> ByCategory = [];
+}
+
+/// What the desk shows at the top. Reviewers only.
+[Authorize(ReviewsIncidents)]
+public IncidentFigures IncidentFiguresNow() {
+  var since = DateTime.UtcNow.AddDays(-90);
+  var recent = IncidentReport.Include(r => r.Category).Where(r => r.OccurredAt >= since).Take(2000).ToList();
+  return new IncidentFigures {
+    Open = IncidentReport.Count(r => r.Status == IncidentStatus.Open),
+    UnderReview = IncidentReport.Count(r => r.Status == IncidentStatus.UnderReview),
+    AwaitingAuthority = IncidentReport.Count(r => r.Reportable && r.ReportedToAuthorityAt == null),
+    OverdueActions = OverdueActions().Count,
+    ByCategory = recent.GroupBy(r => r.Category.Name).OrderByDescending(g => g.Count()).Select(g => g.Key + ": " + g.Count()).ToList(),
+  };
+}
+
+// ── forgetting a person ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// What a privacy erasure takes from the incident record about `person`: their name, injury, care and statement where
+/// they are named, and the notices sent to them. The reports stay — they are the organisation's record of what
+/// happened, kept for as long as the law asks — with the person shown as "Erased". Answers how many rows changed.
+[Server, Authorize(ReviewsIncidents)]
+[SuppressWarning("cost-unbounded-read")]   // an erasure takes every row of one person, however many there are
+public int EraseIncidentDataOf(Principal person) {
+  var n = 0;
+  foreach (var p in IncidentPerson.Where(x => x.Person == person).ToList()) {
+    p.Name = "Erased";
+    p.Injury = "";
+    p.TreatmentNote = "";
+    p.Statement = "";
+    n = n + 1;
+  }
+  foreach (var x in IncidentNotice.Where(x => x.Recipient == person).ToList()) { x.Delete(); n = n + 1; }
+  UnitOfWork.Commit();
+  return n;
+}
