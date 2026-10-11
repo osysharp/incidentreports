@@ -1,0 +1,19 @@
+// The club's roles and its answers to both kits.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Guardianship;
+using Osysharp.IncidentReports;
+
+[Role] enum ClubRole { Authenticator, Parent, Coach, Welfare }
+
+policy IsCoach => RoleGrant.Any(g => g.Member == user && g.Role == ClubRole.Coach);
+policy IsWelfare => RoleGrant.Any(g => g.Member == user && g.Role == ClubRole.Welfare);
+
+/// Coaches report; the welfare officer reviews — and so sees who looks after each player.
+policy ReportsIncidents => IsCoach || IsWelfare;
+policy ReviewsIncidents => IsWelfare;
+policy SeesFamilies => IsWelfare;
+policy ManagesGuardianships => IsWelfare;
+
+app.Accounts = new AccountsSetup { AppName = "Riverside Juniors FC", SignupRole = ClubRole.Parent };

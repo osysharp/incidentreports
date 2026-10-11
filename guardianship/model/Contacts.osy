@@ -1,0 +1,13 @@
+namespace Osysharp.IncidentReports.Guardianship;
+
+using Osysharp.Identity;
+using Osysharp.IncidentReports;
+using Osysharp.Guardianship;
+
+/// The people who look after `person` — acting for them or kept informed, the first linked first — are who an incident
+/// naming them is told to. Found by the incident kit; nothing is wired.
+public class GuardiansAreTold : IIncidentContacts {
+  public List<Principal> ContactsFor(Principal person) {
+    return GuardiansOf(person).Select(g => g.Guardian).ToList();
+  }
+}

@@ -1,0 +1,20 @@
+// Osysharp.IncidentReports.Guardianship — the people who look after somebody are the ones told when they are named in an
+// incident: a child's parents, a client's carer. Their guardians, acting or kept informed, are offered on the review
+// desk ("Tell Pia Varga"), told in one call (`InformContacts`), and acknowledge what they were told.
+//
+// ⚑ A BRIDGE, SO NEITHER KIT DEPENDS ON THE OTHER: the incident kit asks `IIncidentContacts` and Guardianship answers
+//   with the guardians it links. An app using both writes nothing: it arrives by itself (`completes` below — `osy lock`
+//   includes it and says so).
+// ⚑ THE ANSWER IS READ AS THE REVIEWER. Whoever reviews incidents must be able to see who looks after the people named —
+//   answer `policy SeesFamilies => IsOffice || ReviewsIncidents;` (or whoever reviews).
+package Osysharp.IncidentReports.Guardianship {
+  version     "0.1.0";
+  minPlatform "0.9.0";
+  summary     "the guardians Osysharp.Guardianship links are who Osysharp.IncidentReports tells when somebody they look after is named in an incident — offered on the review desk, told in one call, and their acknowledgement kept.";
+  completes   Osysharp.IncidentReports@0, Osysharp.Guardianship@0;
+  model "model/*.osy";
+  use Osysharp.Identity@0;
+  use Osysharp.IncidentReports@0;
+  use Osysharp.Guardianship@0;
+  tests "tests";
+}

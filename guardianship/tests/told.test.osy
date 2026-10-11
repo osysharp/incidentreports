@@ -1,0 +1,61 @@
+// A player's guardians are who the welfare officer tells — the acting one and the one kept informed, not one whose link
+// has ended — and a guardian reads what they were told and acknowledges it.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Guardianship;
+using Osysharp.IncidentReports;
+
+principal Coach => User.Single(u => u.Email == "coach@riverside.test");
+principal Wendy => User.Single(u => u.Email == "wendy@riverside.test");
+principal Maya => User.Single(u => u.Email == "maya@riverside.test");
+principal Tom => User.Single(u => u.Email == "tom@riverside.test");
+
+User Member(string email, string name, ClubRole role) {
+  var u = new User { Email = email, DisplayName = name, EmailVerifiedAt = DateTime.UtcNow };
+  new RoleGrant { Member = u, Role = role };
+  return u;
+}
+
+/// Sam (12) plays for the under-13s. Maya acts for him, his grandfather Tom is kept informed, and a former stepparent's
+/// link has ended. At training his coach reported a sprained ankle.
+[TestFixture]
+void Training() {
+  var coach = Member("coach@riverside.test", "Coach Diaz", ClubRole.Coach);
+  Member("wendy@riverside.test", "Wendy Hale", ClubRole.Welfare);
+  var maya = Member("maya@riverside.test", "Maya Ortiz", ClubRole.Parent);
+  var tom = Member("tom@riverside.test", "Tom Ortiz", ClubRole.Parent);
+  var lee = Member("lee@riverside.test", "Lee Park", ClubRole.Parent);
+  var sam = new User { Email = "sam@managed.invalid", DisplayName = "Sam Ortiz" };
+  new Guardianship { Guardian = maya, Dependant = sam, Standing = GuardianStanding.Acting };
+  new Guardianship { Guardian = tom, Dependant = sam, Relationship = GuardianRelationship.Relative, Standing = GuardianStanding.Informed };
+  new Guardianship { Guardian = lee, Dependant = sam, Standing = GuardianStanding.Ended };
+  var injury = new IncidentCategory { Key = "injury", Name = "Injury", AsksAboutInjury = true };
+  var r = new IncidentReport { Reporter = coach, OccurredAt = DateTime.UtcNow.AddHours(-2), Category = injury, Location = "Pitch 2",
+                               Description = "Sam went over on his ankle in a tackle." };
+  new IncidentPerson { Report = r, Person = sam, Name = "Sam Ortiz", Role = IncidentRole.Injured, Injury = "Sprained right ankle",
+                       Treatment = IncidentTreatment.FirstAid, TreatmentNote = "Ice and rest" };
+}
+
+IncidentPerson Sam() { return IncidentPerson.Single(p => p.Name == "Sam Ortiz"); }
+
+[Test(Training)]
+[runas(Wendy)]
+void a_players_guardians_acting_or_kept_informed_are_who_is_told() {
+  Assert.Equal(["Maya Ortiz", "Tom Ortiz"], ContactsToInform(Sam()).Select(p => p.DisplayName).ToList());
+  var sent = InformContacts(Sam(), "He was able to walk to the car.");
+  Assert.Equal(2, sent.Count);
+  Assert.Equal(0, InformContacts(Sam()).Count);
+}
+
+[Test(Training)]
+[runas(Maya)]
+void a_guardian_reads_what_she_was_told_and_acknowledges_it_and_never_reads_the_report() {
+  runas(Wendy) { InformContacts(Sam()); }
+  var mine = MyIncidentNotices();
+  Assert.Equal(1, mine.Count);
+  Assert.Contains("Injury: Sprained right ankle", mine[0].Summary);
+  Assert.Equal(0, IncidentReport.Count());
+  AcknowledgeIncidentNotice(mine[0], "Thanks — we are seeing the doctor tomorrow.");
+  Assert.NotNull(MyIncidentNotices()[0].AcknowledgedAt);
+}
