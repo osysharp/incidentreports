@@ -12,8 +12,8 @@
 // ⚑ NOTHING IS DELETED. A report is corrected by its author while it is open and moves on only through the review; a
 //   closed one can be re-opened, never removed.
 package Osysharp.IncidentReports {
-  version     "0.1.0";
-  minPlatform "0.9.0";
+  version     "0.2.0";
+  minPlatform "0.14.0";
   summary     "confidential incident reports — injuries, near misses, damage, concerns — in categories and severities the app defines, with the people involved and witnesses (accounts or just names), their statements, injuries and treatment, photos and files, a review that classifies the report, records the cause and sets corrective actions with owners and due dates, a close that waits for those actions, notices to the people who must be told (a child's guardians) with their acknowledgement, a deadline for reporting to an authority watched on a durable clock, a register with a CSV export — and a reporter's page, a review desk, the register and a setup page.";
   pairsWith   "Osysharp.Guardianship: a child's guardians are told about an incident involving the child (Osysharp.IncidentReports.Guardianship arrives by itself)";
   model "model/**/*.osy";

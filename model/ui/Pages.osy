@@ -72,7 +72,7 @@ public component IncidentRows(string title, List<IncidentRow> rows, string empty
   render {
     Stack(gap: 2) {
       SectionLabel(title);
-      Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden, role: UiRole.List, label: title) {
+      Stack(gap: 0, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Lg, overflow: Overflow.Hidden, role: (rows.Count == 0) ? UiRole.Group : UiRole.List, label: title) {
         if (rows.Count == 0) { Box(p: 4) { Text(empty, color: Colors.TextMuted); } }
         foreach (var r in rows) {
           Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap, px: 4, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: r.Number) {
@@ -431,7 +431,7 @@ public component IncidentDetail(Guid report, Action onChanged, bool heading = fa
           Box(grow: 1) { SectionLabel("People"); }
           if (card.CanAdd) { Button("Add a person", onPress: () => { adding = true; }, size: Size.Sm, tone: Tone.Ghost); }
         }
-        Stack(gap: 2, role: UiRole.List, label: "People") {
+        Stack(gap: 2, role: (card.People.Count == 0) ? UiRole.Group : UiRole.List, label: "People") {
           if (card.People.Count == 0) { Text("Nobody named yet.", color: Colors.TextMuted); }
           foreach (var p in card.People) {
             Stack(gap: 1, p: 3, bg: Colors.Surface, borderW: 1, border: Colors.Border, rounded: Radius.Md, role: UiRole.ListItem, label: p.Name) {
@@ -485,7 +485,7 @@ public component IncidentDetail(Guid report, Action onChanged, bool heading = fa
               Box(grow: 1) { SectionLabel("Corrective actions"); }
               if (card.Status != IncidentStatus.Closed) { Button("Add an action", onPress: StartAssign, size: Size.Sm, tone: Tone.Ghost); }
             }
-            Stack(gap: 0, role: UiRole.List, label: "Corrective actions") {
+            Stack(gap: 0, role: (card.Actions.Count == 0) ? UiRole.Group : UiRole.List, label: "Corrective actions") {
               if (card.Actions.Count == 0) { Text("None yet.", color: Colors.TextMuted); }
               foreach (var a in card.Actions) {
                 Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: a.What) {
