@@ -20,7 +20,7 @@ void a_cook_reports_a_burn_with_who_was_hurt_and_a_photo() {
   Ui.Fill("Their name", "Cleo Marsh");
   Ui.Fill("The injury", "Small burn, back of the right hand");
   Ui.Fill("A witness", "Ada Okafor");
-  Ui.Upload("Add a photo", "hand.jpg", "a photo of the burn");
+  Ui.Upload("Add a photo", "hand.jpg", AJpeg());   // a real JPEG: the field sniffs what a file IS
   Assert.Visible("hand.jpg");
   Ui.Shot("incidents-report");
   Ui.Click("File the report");
@@ -148,4 +148,9 @@ void the_pages_fit_a_phone_and_read_in_the_dark() {
   Ui.Visit("/staff/incidents");
   Assert.Visible("Waiting for review");
   Ui.Shot("incidents-desk-dark");
+}
+
+// A 1×1 JPEG — real image bytes, because the photo field accepts images and looks at the content, not the name.
+byte[] AJpeg() {
+  return Convert.FromBase64String("/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAAaADAAQAAAABAAAAAQAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgAAQABAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/bAEMAGxsbGxsbLxsbL0IvLy9CWUJCQkJZcFlZWVlZcIhwcHBwcHCIiIiIiIiIiKOjo6Ojo76+vr6+1dXV1dXV1dXV1f/bAEMBISMjNjI2XTIyXd+XfJff39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f3//dAAQAAf/aAAwDAQACEQMRAD8Akooor0CT/9k=");
 }

@@ -104,3 +104,83 @@ on the legal obligation incident records carry, and erased from the record when 
 
 [github.com/osysharp/incidentreports](https://github.com/osysharp/incidentreports). Its tests (`tests/`) are a summer day
 camp's: every behaviour above, each seam shown, the rules proved as each person, and the pages under `osy test --pixels`.
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Workflow;
+using Osysharp.IncidentReports;
+
+[Test(Camp)]
+[runas(Dana)]
+void an_action_is_set_its_owner_reads_it_without_the_report_and_marks_it_done() {
+  var a = AssignCorrectiveAction(At("Canoe dock"), "Check every buoyancy aid", Ben, new DateOnly(2026, 7, 16));
+  Assert.Equal(1, HeardCount("assigned"));
+  Assert.Equal(1, Heard.Count(h => h.Detail == "Check every buoyancy aid:Ben Strand"));
+  runas(Ben) {
+    var mine = MyCorrectiveActions();
+    Assert.Equal(1, mine.Count);
+    Assert.Equal("INC-00002 · Near miss", mine[0].About);
+    Assert.Equal(0, IncidentReport.Count(r => r.Location == "Canoe dock"));
+    Assert.Equal("Say what was done.", Assert.Throws<ValidationException>(() => CompleteCorrectiveAction(mine[0], "")).Message);
+    CompleteCorrectiveAction(mine[0], "All twenty checked; two replaced.");
+    Assert.Equal(0, MyCorrectiveActions().Count);
+  }
+  Assert.Equal(ActionStatus.Done, CorrectiveAction.Single(x => x.Id == a.Id).Status);
+  Assert.Equal(1, HeardCount("completed"));
+}
+```
+
+From [`tests/actions.test.osy`](tests/actions.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.IncidentReports;
+
+[Test(Camp)]
+[runas(Dana)]
+void the_camps_contacts_are_who_must_be_told_about_a_camper() {
+  var milo = Named("The jetty", "Milo Varga");
+  Assert.Equal(["Pia Varga"], ContactsToInform(milo).Select(p => p.DisplayName).ToList());
+  Assert.Equal(0, ContactsToInform(Named("The jetty", "Ben Strand")).Count);
+}
+```
+
+From [`tests/notices.test.osy`](tests/notices.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.IncidentReports;
+
+[Test(Camp)]
+[runas(Dana)]
+void the_register_lists_a_periods_reports_oldest_first_with_who_was_hurt() {
+  var rows = IncidentRegister(new DateOnly(2026, 7, 1), new DateOnly(2026, 7, 31));
+  Assert.Equal(["INC-00002", "INC-00001", "INC-00003"], rows.Select(r => r.Number).ToList());
+  var knee = rows.Single(r => r.Number == "INC-00001");
+  Assert.Equal("Milo Varga (first aid on site)", knee.Hurt);
+  Assert.Equal("Injury", knee.Category);
+  Assert.Equal("Minor", knee.Severity);
+  Assert.Equal("Ada Okafor", knee.ReportedBy);
+  Assert.Equal(1, IncidentRegister(new DateOnly(2026, 7, 12), new DateOnly(2026, 7, 12)).Count);
+}
+```
+
+From [`tests/register.test.osy`](tests/register.test.osy).
+
+## Learn more
+
+- [The Osysharp.IncidentReports reference](https://osysharp.com/reference/ui/incident-reports-kit/)
+- [Osysharp.IncidentReports in the package catalogue](https://osysharp.com/packages/#osysharp-incidentreports)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).
