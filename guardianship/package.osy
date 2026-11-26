@@ -8,10 +8,11 @@
 // ⚑ THE ANSWER IS READ AS THE REVIEWER. Whoever reviews incidents must be able to see who looks after the people named —
 //   answer `policy SeesFamilies => IsOffice || ReviewsIncidents;` (or whoever reviews).
 package Osysharp.IncidentReports.Guardianship {
-  version     "0.2.0";
-  minPlatform "0.14.0";
+  version     "0.3.0";
+  minPlatform "0.25.0";
   summary     "the guardians Osysharp.Guardianship links are who Osysharp.IncidentReports tells when somebody they look after is named in an incident — offered on the review desk, told in one call, and their acknowledgement kept.";
   completes   Osysharp.IncidentReports@0, Osysharp.Guardianship@0;
+  layout "Osysharp.IncidentReports.Guardianship" members;
   model "model/*.osy";
   use Osysharp.Identity@0;
   use Osysharp.IncidentReports@0;
